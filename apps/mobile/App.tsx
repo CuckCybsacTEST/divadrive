@@ -16,9 +16,14 @@ import * as Location from "expo-location";
 import {
   DEFAULT_HOME_BOOTSTRAP,
   SERVICE_NAME,
+  type CreateTripRequest,
   type AuthSession,
   type HomeBootstrap,
   type MapRegion,
+  type RequestedTrip,
+  type RideEstimate,
+  type RideEstimateRequest,
+  type RidePoint,
   type SignInPayload
 } from "@diva-drive/domain";
 
@@ -72,14 +77,93 @@ const loadPassengerHome = async (session: AuthSession): Promise<HomeBootstrap> =
   }
 };
 
+const estimateRide = async (
+  session: AuthSession,
+  payload: RideEstimateRequest
+): Promise<RideEstimate> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/trips/estimate`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.accessToken}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error("estimate_failed");
+    }
+
+    return (await response.json()) as RideEstimate;
+  } catch {
+    const latitudeDelta = payload.destination.latitude - payload.origin.latitude;
+    const longitudeDelta = payload.destination.longitude - payload.origin.longitude;
+    const roughDistanceKm = Number(
+      Math.max(
+        1.2,
+        Math.sqrt(
+          latitudeDelta * latitudeDelta * 111 * 111 +
+            longitudeDelta * longitudeDelta * 111 * 111
+        )
+      ).toFixed(1)
+    );
+
+    return {
+      currency: "PEN",
+      distanceKm: roughDistanceKm,
+      durationMinutes: Math.max(8, Math.round(roughDistanceKm * 3.2)),
+      estimatedFare: Number((5.5 + roughDistanceKm * 1.8).toFixed(2))
+    };
+  }
+};
+
+const requestTrip = async (
+  session: AuthSession,
+  payload: CreateTripRequest
+): Promise<RequestedTrip> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/trips`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Authorization: `Bearer ${session.accessToken}`
+      },
+      body: JSON.stringify(payload)
+    });
+
+    if (!response.ok) {
+      throw new Error("request_trip_failed");
+    }
+
+    return (await response.json()) as RequestedTrip;
+  } catch {
+    return {
+      id: `trip-local-${Date.now()}`,
+      passengerId: payload.passengerId,
+      origin: payload.origin,
+      destination: payload.destination,
+      estimate: await estimateRide(session, payload),
+      status: "requested",
+      requestedAt: new Date().toISOString()
+    };
+  }
+};
+
 export default function App() {
   const [phone, setPhone] = useState("999111222");
   const [session, setSession] = useState<AuthSession | null>(null);
   const [home, setHome] = useState<HomeBootstrap | null>(null);
+  const [origin, setOrigin] = useState<RidePoint | null>(null);
+  const [selectedDestination, setSelectedDestination] = useState<RidePoint | null>(null);
+  const [estimate, setEstimate] = useState<RideEstimate | null>(null);
+  const [activeTrip, setActiveTrip] = useState<RequestedTrip | null>(null);
   const [mapRegion, setMapRegion] = useState<MapRegion>(
     DEFAULT_HOME_BOOTSTRAP.mapRegion
   );
   const [loading, setLoading] = useState(false);
+  const [estimating, setEstimating] = useState(false);
+  const [requestingTrip, setRequestingTrip] = useState(false);
 
   useEffect(() => {
     if (!session) {
@@ -103,6 +187,9 @@ export default function App() {
 
         setHome(bootstrap);
         setMapRegion(bootstrap.mapRegion);
+        setSelectedDestination(bootstrap.suggestedDestinations[0] ?? null);
+        setEstimate(null);
+        setActiveTrip(null);
 
         if (locationPermission.status === "granted") {
           const currentPosition = await Location.getCurrentPositionAsync({});
@@ -116,6 +203,20 @@ export default function App() {
             latitude: currentPosition.coords.latitude,
             longitude: currentPosition.coords.longitude
           }));
+
+          setOrigin({
+            label: "Ubicacion actual",
+            address: "Posicion detectada por el dispositivo",
+            latitude: currentPosition.coords.latitude,
+            longitude: currentPosition.coords.longitude
+          });
+        } else {
+          setOrigin({
+            label: "Punto de recojo",
+            address: "Centro operativo inicial de DIVA DRIVE",
+            latitude: bootstrap.mapRegion.latitude,
+            longitude: bootstrap.mapRegion.longitude
+          });
         }
       } catch {
         if (isMounted) {
@@ -124,6 +225,13 @@ export default function App() {
             "Usaremos la configuracion base mientras completamos el backend."
           );
           setHome(DEFAULT_HOME_BOOTSTRAP);
+          setSelectedDestination(DEFAULT_HOME_BOOTSTRAP.suggestedDestinations[0] ?? null);
+          setOrigin({
+            label: "Punto de recojo",
+            address: "Centro operativo inicial de DIVA DRIVE",
+            latitude: DEFAULT_HOME_BOOTSTRAP.mapRegion.latitude,
+            longitude: DEFAULT_HOME_BOOTSTRAP.mapRegion.longitude
+          });
         }
       } finally {
         if (isMounted) {
@@ -158,6 +266,60 @@ export default function App() {
       Alert.alert("No pudimos iniciar sesion", "Intenta nuevamente.");
     } finally {
       setLoading(false);
+    }
+  };
+
+  const handleEstimate = async () => {
+    if (!session || !origin || !selectedDestination) {
+      Alert.alert("Faltan datos", "Necesitamos origen y destino para estimar.");
+      return;
+    }
+
+    setEstimating(true);
+
+    try {
+      const nextEstimate = await estimateRide(session, {
+        origin,
+        destination: selectedDestination
+      });
+
+      setEstimate(nextEstimate);
+    } catch {
+      Alert.alert("No pudimos estimar", "Intenta nuevamente en unos segundos.");
+    } finally {
+      setEstimating(false);
+    }
+  };
+
+  const handleRequestTrip = async () => {
+    if (!session || !origin || !selectedDestination) {
+      Alert.alert("Faltan datos", "Completa origen y destino antes de solicitar.");
+      return;
+    }
+
+    setRequestingTrip(true);
+
+    try {
+      const trip = await requestTrip(session, {
+        passengerId: session.user.id,
+        origin,
+        destination: selectedDestination
+      });
+
+      setActiveTrip(trip);
+      setEstimate(trip.estimate);
+      setHome((currentHome) =>
+        currentHome
+          ? {
+              ...currentHome,
+              activeTripStatus: trip.status
+            }
+          : currentHome
+      );
+    } catch {
+      Alert.alert("No pudimos solicitar", "Intenta nuevamente.");
+    } finally {
+      setRequestingTrip(false);
     }
   };
 
@@ -210,23 +372,27 @@ export default function App() {
       <View style={styles.container}>
         <View style={styles.mapShell}>
           <MapView style={styles.map} initialRegion={mapRegion} region={mapRegion}>
-            <Marker
-              coordinate={{
-                latitude: mapRegion.latitude,
-                longitude: mapRegion.longitude
-              }}
-              title="Tu ubicacion"
-              description="Punto base para solicitar viaje"
-            />
-            <Marker
-              coordinate={{
-                latitude: mapRegion.latitude + 0.01,
-                longitude: mapRegion.longitude + 0.008
-              }}
-              title="Zona segura"
-              description="Cobertura inicial de DIVA DRIVE"
-              pinColor="#c54b23"
-            />
+            {origin ? (
+              <Marker
+                coordinate={{
+                  latitude: origin.latitude,
+                  longitude: origin.longitude
+                }}
+                title={origin.label}
+                description={origin.address}
+              />
+            ) : null}
+            {selectedDestination ? (
+              <Marker
+                coordinate={{
+                  latitude: selectedDestination.latitude,
+                  longitude: selectedDestination.longitude
+                }}
+                title={selectedDestination.label}
+                description={selectedDestination.address}
+                pinColor="#c54b23"
+              />
+            ) : null}
           </MapView>
 
           <View style={styles.topOverlay}>
@@ -251,6 +417,113 @@ export default function App() {
           ) : (
             <>
               <View style={styles.card}>
+                <Text style={styles.cardTitle}>Origen</Text>
+                <Text style={styles.itemStrong}>
+                  {origin?.label ?? "Cargando ubicacion"}
+                </Text>
+                <Text style={styles.quickActionHint}>
+                  {origin?.address ?? "Estamos preparando tu punto de recojo"}
+                </Text>
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Destino</Text>
+                {home.suggestedDestinations.map((destination) => {
+                  const isSelected = destination.label === selectedDestination?.label;
+
+                  return (
+                    <Pressable
+                      key={destination.label}
+                      onPress={() => {
+                        setSelectedDestination(destination);
+                        setEstimate(null);
+                      }}
+                      style={[
+                        styles.destinationRow,
+                        isSelected && styles.destinationRowSelected
+                      ]}
+                    >
+                      <Text
+                        style={[
+                          styles.quickActionLabel,
+                          isSelected && styles.destinationLabelSelected
+                        ]}
+                      >
+                        {destination.label}
+                      </Text>
+                      <Text style={styles.quickActionHint}>{destination.address}</Text>
+                    </Pressable>
+                  );
+                })}
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Estimacion</Text>
+                {estimate ? (
+                  <>
+                    <Text style={styles.itemStrong}>
+                      {estimate.currency} {estimate.estimatedFare.toFixed(2)}
+                    </Text>
+                    <Text style={styles.item}>
+                      {estimate.distanceKm} km - {estimate.durationMinutes} min aprox.
+                    </Text>
+                  </>
+                ) : (
+                  <Text style={styles.item}>Aun no calculada.</Text>
+                )}
+
+                <Pressable
+                  disabled={estimating}
+                  onPress={handleEstimate}
+                  style={({ pressed }) => [
+                    styles.secondaryButton,
+                    pressed && styles.buttonPressed,
+                    estimating && styles.buttonDisabled
+                  ]}
+                >
+                  {estimating ? (
+                    <ActivityIndicator color="#c54b23" />
+                  ) : (
+                    <Text style={styles.secondaryButtonText}>Calcular estimacion</Text>
+                  )}
+                </Pressable>
+
+                <Pressable
+                  disabled={requestingTrip || !estimate}
+                  onPress={handleRequestTrip}
+                  style={({ pressed }) => [
+                    styles.primaryButton,
+                    styles.requestButton,
+                    pressed && styles.buttonPressed,
+                    (requestingTrip || !estimate) && styles.buttonDisabled
+                  ]}
+                >
+                  {requestingTrip ? (
+                    <ActivityIndicator color="#fffaf6" />
+                  ) : (
+                    <Text style={styles.primaryButtonText}>Solicitar viaje</Text>
+                  )}
+                </Pressable>
+              </View>
+
+              <View style={styles.card}>
+                <Text style={styles.cardTitle}>Estado del viaje</Text>
+                <Text style={styles.itemStrong}>
+                  {activeTrip?.status ??
+                    home.activeTripStatus ??
+                    "Sin viaje activo. Lista para solicitar."}
+                </Text>
+                {activeTrip ? (
+                  <>
+                    <Text style={styles.item}>Viaje: {activeTrip.id}</Text>
+                    <Text style={styles.item}>
+                      Destino: {activeTrip.destination.label}
+                    </Text>
+                  </>
+                ) : null}
+              </View>
+
+              <View style={styles.card}>
                 <Text style={styles.cardTitle}>Acciones rapidas</Text>
                 {home.quickActions.map((action) => (
                   <View key={action.id} style={styles.quickActionRow}>
@@ -258,13 +531,6 @@ export default function App() {
                     <Text style={styles.quickActionHint}>{action.hint}</Text>
                   </View>
                 ))}
-              </View>
-
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Estado del viaje</Text>
-                <Text style={styles.item}>
-                  {home.activeTripStatus ?? "Sin viaje activo. Lista para solicitar."}
-                </Text>
               </View>
 
               <View style={styles.card}>
@@ -423,19 +689,58 @@ const styles = StyleSheet.create({
     fontSize: 16,
     marginBottom: 8
   },
+  itemStrong: {
+    color: "#1d1c1a",
+    fontSize: 18,
+    fontWeight: "700",
+    marginBottom: 8
+  },
   quickActionRow: {
     paddingVertical: 10,
     borderBottomWidth: 1,
     borderBottomColor: "#f0e5dc"
+  },
+  destinationRow: {
+    paddingVertical: 12,
+    paddingHorizontal: 12,
+    borderRadius: 16,
+    borderWidth: 1,
+    borderColor: "#f0e5dc",
+    marginBottom: 10
+  },
+  destinationRowSelected: {
+    borderColor: "#c54b23",
+    backgroundColor: "#fff1ea"
   },
   quickActionLabel: {
     color: "#1d1c1a",
     fontSize: 16,
     fontWeight: "700"
   },
+  destinationLabelSelected: {
+    color: "#a53a17"
+  },
   quickActionHint: {
     color: "#5a534d",
     fontSize: 14,
     marginTop: 4
+  },
+  secondaryButton: {
+    marginTop: 12,
+    minHeight: 48,
+    borderRadius: 14,
+    alignItems: "center",
+    justifyContent: "center",
+    borderWidth: 1,
+    borderColor: "#c54b23",
+    backgroundColor: "#fffaf6"
+  },
+  secondaryButtonText: {
+    color: "#c54b23",
+    fontSize: 15,
+    fontWeight: "800"
+  },
+  requestButton: {
+    marginTop: 12
   }
 });

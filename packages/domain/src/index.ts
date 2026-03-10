@@ -64,6 +64,16 @@ export interface MapRegion {
   longitudeDelta: number;
 }
 
+export interface Coordinates {
+  latitude: number;
+  longitude: number;
+}
+
+export interface RidePoint extends Coordinates {
+  label: string;
+  address: string;
+}
+
 export interface HomeQuickAction {
   id: string;
   label: string;
@@ -74,8 +84,56 @@ export interface HomeBootstrap {
   city: string;
   mapRegion: MapRegion;
   quickActions: HomeQuickAction[];
+  suggestedDestinations: RidePoint[];
   activeTripStatus: TripStatus | null;
 }
+
+export interface RideEstimateRequest {
+  origin: RidePoint;
+  destination: RidePoint;
+}
+
+export interface RideEstimate {
+  currency: string;
+  distanceKm: number;
+  durationMinutes: number;
+  estimatedFare: number;
+}
+
+export interface RequestedTrip {
+  id: string;
+  passengerId: string;
+  origin: RidePoint;
+  destination: RidePoint;
+  estimate: RideEstimate;
+  status: Extract<TripStatus, "requested">;
+  requestedAt: string;
+}
+
+export interface CreateTripRequest extends RideEstimateRequest {
+  passengerId: string;
+}
+
+export const SUGGESTED_DESTINATIONS: RidePoint[] = [
+  {
+    label: "Larcomar",
+    address: "Malecon de la Reserva 610, Miraflores",
+    latitude: -12.1317,
+    longitude: -77.0301
+  },
+  {
+    label: "Jockey Plaza",
+    address: "Av. Javier Prado Este 4200, Santiago de Surco",
+    latitude: -12.0866,
+    longitude: -76.9765
+  },
+  {
+    label: "Centro Empresarial",
+    address: "Av. Victor Andres Belaunde 147, San Isidro",
+    latitude: -12.0974,
+    longitude: -77.0357
+  }
+];
 
 export const DEFAULT_HOME_BOOTSTRAP: HomeBootstrap = {
   city: DEFAULT_CITY,
@@ -102,5 +160,6 @@ export const DEFAULT_HOME_BOOTSTRAP: HomeBootstrap = {
       hint: "Comparte tu viaje y revisa soporte"
     }
   ],
+  suggestedDestinations: SUGGESTED_DESTINATIONS,
   activeTripStatus: null
 };

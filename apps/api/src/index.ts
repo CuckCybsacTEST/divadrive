@@ -5,6 +5,9 @@ import {
   DEFAULT_HOME_BOOTSTRAP,
   SERVICE_NAME,
   type AuthSession,
+  type RequestedTrip,
+  type RideEstimate,
+  type RideEstimateRequest,
   TRIP_EVENT_TYPES,
   TRIP_STATUSES
 } from "@diva-drive/domain";
@@ -18,10 +21,64 @@ await app.register(cors, {
 });
 
 const sessions = new Map<string, AuthSession>();
+const tripsByPassengerId = new Map<string, RequestedTrip>();
 const signInSchema = z.object({
   phone: z.string().min(9),
   role: z.enum(["passenger", "driver"])
 });
+const ridePointSchema = z.object({
+  label: z.string().min(1),
+  address: z.string().min(1),
+  latitude: z.number(),
+  longitude: z.number()
+});
+const rideEstimateSchema = z.object({
+  origin: ridePointSchema,
+  destination: ridePointSchema
+});
+const createTripSchema = rideEstimateSchema.extend({
+  passengerId: z.string().min(1)
+});
+
+const requireSession = (authorizationHeader?: string) => {
+  const token = authorizationHeader?.replace("Bearer ", "");
+
+  if (!token || !sessions.has(token)) {
+    return null;
+  }
+
+  return sessions.get(token) ?? null;
+};
+
+const toRadians = (value: number) => (value * Math.PI) / 180;
+
+const estimateRide = ({ origin, destination }: RideEstimateRequest): RideEstimate => {
+  const earthRadiusKm = 6371;
+  const deltaLatitude = toRadians(destination.latitude - origin.latitude);
+  const deltaLongitude = toRadians(destination.longitude - origin.longitude);
+  const latitudeA = toRadians(origin.latitude);
+  const latitudeB = toRadians(destination.latitude);
+
+  const haversine =
+    Math.sin(deltaLatitude / 2) * Math.sin(deltaLatitude / 2) +
+    Math.cos(latitudeA) *
+      Math.cos(latitudeB) *
+      Math.sin(deltaLongitude / 2) *
+      Math.sin(deltaLongitude / 2);
+
+  const distanceKm = Number(
+    (earthRadiusKm * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))).toFixed(1)
+  );
+  const durationMinutes = Math.max(8, Math.round(distanceKm * 3.2));
+  const estimatedFare = Number((5.5 + distanceKm * 1.8).toFixed(2));
+
+  return {
+    currency: "PEN",
+    distanceKm,
+    durationMinutes,
+    estimatedFare
+  };
+};
 
 const createSession = (payload: z.infer<typeof signInSchema>): AuthSession => {
   const idSuffix = payload.phone.replace(/\D/g, "").slice(-4) || "0000";
@@ -68,29 +125,111 @@ app.post("/auth/sign-in", async (request, reply) => {
 });
 
 app.get("/auth/session", async (request, reply) => {
-  const token = request.headers.authorization?.replace("Bearer ", "");
+  const session = requireSession(request.headers.authorization);
 
-  if (!token || !sessions.has(token)) {
+  if (!session) {
     reply.status(401);
     return {
       error: "invalid_session"
     };
   }
 
-  return sessions.get(token);
+  return session;
 });
 
 app.get("/home/passenger", async (request, reply) => {
-  const token = request.headers.authorization?.replace("Bearer ", "");
+  const session = requireSession(request.headers.authorization);
 
-  if (!token || !sessions.has(token)) {
+  if (!session) {
     reply.status(401);
     return {
       error: "invalid_session"
     };
   }
 
-  return DEFAULT_HOME_BOOTSTRAP;
+  return {
+    ...DEFAULT_HOME_BOOTSTRAP,
+    activeTripStatus: tripsByPassengerId.get(session.user.id)?.status ?? null
+  };
+});
+
+app.post("/trips/estimate", async (request, reply) => {
+  const session = requireSession(request.headers.authorization);
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  const parsedPayload = rideEstimateSchema.safeParse(request.body);
+
+  if (!parsedPayload.success) {
+    reply.status(400);
+    return {
+      error: "invalid_estimate_payload"
+    };
+  }
+
+  return estimateRide(parsedPayload.data);
+});
+
+app.post("/trips", async (request, reply) => {
+  const session = requireSession(request.headers.authorization);
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  const parsedPayload = createTripSchema.safeParse(request.body);
+
+  if (!parsedPayload.success) {
+    reply.status(400);
+    return {
+      error: "invalid_trip_payload"
+    };
+  }
+
+  if (parsedPayload.data.passengerId !== session.user.id) {
+    reply.status(403);
+    return {
+      error: "passenger_mismatch"
+    };
+  }
+
+  const estimate = estimateRide(parsedPayload.data);
+  const trip: RequestedTrip = {
+    id: `trip-${Date.now()}`,
+    passengerId: parsedPayload.data.passengerId,
+    origin: parsedPayload.data.origin,
+    destination: parsedPayload.data.destination,
+    estimate,
+    status: "requested",
+    requestedAt: new Date().toISOString()
+  };
+
+  tripsByPassengerId.set(session.user.id, trip);
+  reply.status(201);
+  return trip;
+});
+
+app.get("/trips/active", async (request, reply) => {
+  const session = requireSession(request.headers.authorization);
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  return {
+    trip: tripsByPassengerId.get(session.user.id) ?? null
+  };
 });
 
 const start = async () => {

@@ -25,6 +25,7 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - bootstrap inicial de home de pasajero desde backend
 - home movil con mapa real como primer viewport
 - contratos compartidos de sesion y home en `packages/domain`
+- seleccion de destino sugerido, estimacion y solicitud inicial de viaje
 
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
@@ -48,4 +49,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Implementar el siguiente slice vertical del producto: seleccion de origen y destino, estimacion base y solicitud inicial de viaje apoyada en `packages/domain`.
+Implementar el siguiente slice vertical del producto: matching base, tracking de viaje y transiciones de estado `requested -> matched -> driver_en_route`.
