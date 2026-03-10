@@ -39,6 +39,7 @@ import {
   TRIP_STATUSES
 } from "@diva-drive/domain";
 import { readBusinessRules, writeBusinessRules } from "./business-store.js";
+import { appEnv } from "./env.js";
 import { readEvents, writeEvents } from "./event-store.js";
 import { readIncidents, writeIncidents } from "./incident-store.js";
 import { readTrips, writeTrips } from "./trip-store.js";
@@ -647,7 +648,8 @@ const getTripHistoryForSession = (session: AuthSession): TripHistorySnapshot => 
 app.get("/health", async () => {
   return {
     service: SERVICE_NAME,
-    status: "ok"
+    status: "ok",
+    supabaseEnabled: appEnv.supabaseEnabled
   };
 });
 

@@ -36,6 +36,10 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - cambio de estado de incidencias desde panel autenticado
 - onboarding documental basico de conductoras con aprobacion administrativa
 - directorio administrativo de conductoras y pasajeros en panel
+- pricing configurable, promociones administrables y auditoria comercial
+- historial de viajes, metricas comerciales, eventos operativos y notificaciones
+- buscador de destinos, ruta simulada en mapa y ETA mas creible
+- base de integracion a Supabase lista para activarse desde el API
 
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
@@ -49,6 +53,8 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - `docs/NON_FUNCTIONAL_REQUIREMENTS.md`
 - `docs/OPERATIONS_AND_POLICIES.md`
 - `docs/adrs/`
+- `docs/SUPABASE_SETUP.md`
+- `docs/sql/supabase_init.sql`
 
 ## Principios de arranque
 - Android first
@@ -59,4 +65,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Implementar el siguiente slice vertical del producto: pricing configurable, promociones iniciales y reglas comerciales administrables desde panel.
+Conectar el primer repositorio real de persistencia sobre Supabase y migrar `users`, `trips`, `incidents` y `events`.
