@@ -1,10 +1,11 @@
 :root {
   color-scheme: light;
   font-family: "Segoe UI", sans-serif;
+  color: #1f1d1a;
   background:
-    radial-gradient(circle at top, rgba(255, 122, 89, 0.25), transparent 40%),
-    linear-gradient(180deg, #fff9f5 0%, #f4efe8 100%);
-  color: #1d1c1a;
+    radial-gradient(circle at top left, rgba(255, 129, 91, 0.22), transparent 35%),
+    radial-gradient(circle at top right, rgba(18, 121, 92, 0.12), transparent 28%),
+    linear-gradient(180deg, #fff8f2 0%, #efe7dc 100%);
 }
 
 * {
@@ -17,60 +18,172 @@ body {
 }
 
 .shell {
-  max-width: 1080px;
+  max-width: 1320px;
   margin: 0 auto;
-  padding: 64px 24px 80px;
+  padding: 48px 20px 72px;
 }
 
 .hero {
-  margin-bottom: 32px;
+  margin-bottom: 28px;
 }
 
 .eyebrow {
-  margin: 0 0 8px;
+  margin: 0 0 10px;
   text-transform: uppercase;
-  letter-spacing: 0.2em;
+  letter-spacing: 0.24em;
   font-size: 12px;
-  color: #c54b23;
+  color: #c44e27;
 }
 
 .hero h1 {
   margin: 0;
-  font-size: clamp(48px, 9vw, 88px);
-  line-height: 0.95;
+  font-size: clamp(46px, 8vw, 84px);
+  line-height: 0.94;
 }
 
 .lede {
-  max-width: 700px;
+  max-width: 760px;
+  margin: 14px 0 0;
   font-size: 20px;
   line-height: 1.5;
+  color: #534d47;
 }
 
-.grid {
+.stats {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
-  gap: 20px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
 }
 
-.card {
-  padding: 24px;
-  border: 1px solid rgba(29, 28, 26, 0.08);
+.stat,
+.panel,
+.banner {
+  border: 1px solid rgba(31, 29, 26, 0.08);
   border-radius: 24px;
-  background: rgba(255, 255, 255, 0.78);
-  backdrop-filter: blur(12px);
-  box-shadow: 0 18px 50px rgba(90, 54, 38, 0.08);
+  background: rgba(255, 255, 255, 0.8);
+  backdrop-filter: blur(14px);
+  box-shadow: 0 18px 48px rgba(69, 45, 29, 0.08);
 }
 
-.card h2 {
-  margin-top: 0;
+.stat {
+  padding: 18px 20px;
 }
 
-.card ul {
-  padding-left: 18px;
-  margin-bottom: 0;
+.stat span {
+  display: block;
+  color: #655f59;
+  font-size: 14px;
 }
 
-.card li + li {
+.stat strong {
+  display: block;
   margin-top: 8px;
+  font-size: 42px;
+  line-height: 1;
 }
 
+.banner {
+  padding: 14px 18px;
+  margin-bottom: 18px;
+}
+
+.banner.error {
+  color: #9c2c11;
+}
+
+.board {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 18px;
+}
+
+.panel {
+  padding: 18px;
+}
+
+.panelHeader {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  margin-bottom: 14px;
+}
+
+.panelHeader h2 {
+  margin: 0;
+  font-size: 22px;
+}
+
+.panelHeader span {
+  min-width: 32px;
+  height: 32px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 999px;
+  background: #f4eadf;
+  color: #5a534d;
+  font-weight: 700;
+}
+
+.empty {
+  margin: 0;
+  color: #6e6760;
+}
+
+.tripCard {
+  padding: 14px;
+  border-radius: 18px;
+  margin-bottom: 12px;
+  background: #fffdfa;
+  border: 1px solid #efe4d8;
+}
+
+.tripCard.queue {
+  border-left: 6px solid #c44e27;
+}
+
+.tripCard.active {
+  border-left: 6px solid #188362;
+}
+
+.tripCard.done {
+  border-left: 6px solid #7a6e63;
+}
+
+.tripRow {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 12px;
+}
+
+.badge {
+  padding: 6px 10px;
+  border-radius: 999px;
+  background: #f4eadf;
+  color: #534d47;
+  font-size: 12px;
+  text-transform: uppercase;
+  letter-spacing: 0.08em;
+}
+
+.route,
+.meta {
+  margin: 10px 0 0;
+}
+
+.route {
+  font-weight: 700;
+}
+
+.meta {
+  color: #655f59;
+  font-size: 14px;
+}
+
+@media (max-width: 720px) {
+  .shell {
+    padding: 32px 14px 48px;
+  }
+}

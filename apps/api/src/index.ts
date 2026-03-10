@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   DEFAULT_HOME_BOOTSTRAP,
   DRIVER_STATUS_FLOW,
+  type OpsDashboardSnapshot,
   SERVICE_NAME,
   type ActiveTripStatus,
   type AuthSession,
@@ -14,6 +15,7 @@ import {
   TRIP_EVENT_TYPES,
   TRIP_STATUSES
 } from "@diva-drive/domain";
+import { readTrips, writeTrips } from "./trip-store.js";
 
 const app = Fastify({
   logger: true
@@ -25,6 +27,10 @@ await app.register(cors, {
 
 const sessions = new Map<string, AuthSession>();
 const tripsById = new Map<string, RideTrip>();
+
+const persistTrips = async () => {
+  await writeTrips(Array.from(tripsById.values()));
+};
 
 const signInSchema = z.object({
   phone: z.string().min(9),
@@ -207,6 +213,28 @@ const patchTrip = (tripId: string, patch: Partial<RideTrip>) => {
   return nextTrip;
 };
 
+const getOpsSnapshot = (): OpsDashboardSnapshot => {
+  const allTrips = Array.from(tripsById.values()).sort((a, b) =>
+    b.requestedAt.localeCompare(a.requestedAt)
+  );
+  const queueTrips = allTrips.filter((trip) => trip.status === "requested");
+  const completedTrips = allTrips.filter((trip) => trip.status === "trip_completed");
+  const activeTrips = allTrips.filter(
+    (trip) => trip.status !== "requested" && trip.status !== "trip_completed"
+  );
+
+  return {
+    queueTrips,
+    activeTrips,
+    completedTrips,
+    totals: {
+      requested: queueTrips.length,
+      active: activeTrips.length,
+      completed: completedTrips.length
+    }
+  };
+};
+
 app.get("/health", async () => {
   return {
     service: SERVICE_NAME,
@@ -218,6 +246,18 @@ app.get("/meta/trips", async () => {
   return {
     statuses: TRIP_STATUSES,
     events: TRIP_EVENT_TYPES
+  };
+});
+
+app.get("/ops/dashboard", async () => {
+  return getOpsSnapshot();
+});
+
+app.get("/ops/trips", async () => {
+  return {
+    trips: Array.from(tripsById.values()).sort((a, b) =>
+      b.requestedAt.localeCompare(a.requestedAt)
+    )
   };
 });
 
@@ -353,6 +393,7 @@ app.post("/trips", async (request, reply) => {
   };
 
   tripsById.set(trip.id, trip);
+  await persistTrips();
   reply.status(201);
   return trip;
 });
@@ -424,13 +465,15 @@ app.post<{ Params: { tripId: string } }>(
       };
     }
 
-    return patchTrip(trip.id, {
+    const acceptedTrip = patchTrip(trip.id, {
       status: "matched",
       driverId: session.user.id,
       driverName: session.user.fullName,
       driverEtaMinutes: buildDriverEta("matched"),
       currentDriverLocation: buildDriverLocation(trip, "matched")
     });
+    await persistTrips();
+    return acceptedTrip;
   }
 );
 
@@ -488,16 +531,22 @@ app.post<{ Params: { tripId: string }; Body: DriverTripStatusUpdate }>(
 
     const nextStatus = parsedPayload.data.status;
 
-    return patchTrip(trip.id, {
+    const updatedTrip = patchTrip(trip.id, {
       status: nextStatus,
       driverEtaMinutes: buildDriverEta(nextStatus),
       currentDriverLocation: buildDriverLocation(trip, nextStatus)
     });
+    await persistTrips();
+    return updatedTrip;
   }
 );
 
 const start = async () => {
   try {
+    const persistedTrips = await readTrips();
+    for (const trip of persistedTrips) {
+      tripsById.set(trip.id, trip);
+    }
     await app.listen({
       host: "0.0.0.0",
       port: 4000

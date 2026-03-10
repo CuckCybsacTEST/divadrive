@@ -28,6 +28,8 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - seleccion de destino sugerido, estimacion y solicitud inicial de viaje
 - matching base temporal y tracking inicial del viaje en `requested`, `matched` y `driver_en_route`
 - login por rol en mobile, cola de solicitudes para conductora y control manual de estados
+- persistencia local de viajes en `apps/api/data/trips.json`
+- panel web operativo consumiendo cola, activos y completados desde `api`
 
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
@@ -51,4 +53,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Implementar el siguiente slice vertical del producto: persistencia real, panel web operativo y reglas de cancelacion/incidencias.
+Implementar el siguiente slice vertical del producto: incidencias, cancelaciones y autenticacion/panel administrativo con permisos reales.

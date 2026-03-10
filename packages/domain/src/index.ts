@@ -135,6 +135,17 @@ export interface DriverQueueSummary {
   activeTrip: RideTrip | null;
 }
 
+export interface OpsDashboardSnapshot {
+  queueTrips: RideTrip[];
+  activeTrips: RideTrip[];
+  completedTrips: RideTrip[];
+  totals: {
+    requested: number;
+    active: number;
+    completed: number;
+  };
+}
+
 export interface DriverTripStatusUpdate {
   status: Extract<
     ActiveTripStatus,
