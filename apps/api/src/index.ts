@@ -80,6 +80,43 @@ const estimateRide = ({ origin, destination }: RideEstimateRequest): RideEstimat
   };
 };
 
+const buildTrackedTrip = (trip: RequestedTrip): RequestedTrip => {
+  const elapsedMs = Date.now() - new Date(trip.requestedAt).getTime();
+
+  if (elapsedMs < 12000) {
+    return trip;
+  }
+
+  if (elapsedMs < 26000) {
+    return {
+      ...trip,
+      status: "matched",
+      driverName: "Rosa M.",
+      driverEtaMinutes: 6,
+      currentDriverLocation: {
+        latitude: trip.origin.latitude + 0.015,
+        longitude: trip.origin.longitude - 0.012
+      }
+    };
+  }
+
+  return {
+    ...trip,
+    status: "driver_en_route",
+    driverName: "Rosa M.",
+    driverEtaMinutes: 3,
+    currentDriverLocation: {
+      latitude: trip.origin.latitude + 0.006,
+      longitude: trip.origin.longitude - 0.005
+    }
+  };
+};
+
+const getTrackedTripForPassenger = (passengerId: string) => {
+  const trip = tripsByPassengerId.get(passengerId);
+  return trip ? buildTrackedTrip(trip) : null;
+};
+
 const createSession = (payload: z.infer<typeof signInSchema>): AuthSession => {
   const idSuffix = payload.phone.replace(/\D/g, "").slice(-4) || "0000";
   const session: AuthSession = {
@@ -149,7 +186,7 @@ app.get("/home/passenger", async (request, reply) => {
 
   return {
     ...DEFAULT_HOME_BOOTSTRAP,
-    activeTripStatus: tripsByPassengerId.get(session.user.id)?.status ?? null
+    activeTripStatus: getTrackedTripForPassenger(session.user.id)?.status ?? null
   };
 });
 
@@ -228,7 +265,7 @@ app.get("/trips/active", async (request, reply) => {
   }
 
   return {
-    trip: tripsByPassengerId.get(session.user.id) ?? null
+    trip: getTrackedTripForPassenger(session.user.id)
   };
 });
 

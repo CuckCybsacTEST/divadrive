@@ -106,8 +106,11 @@ export interface RequestedTrip {
   origin: RidePoint;
   destination: RidePoint;
   estimate: RideEstimate;
-  status: Extract<TripStatus, "requested">;
+  status: Extract<TripStatus, "requested" | "matched" | "driver_en_route">;
   requestedAt: string;
+  driverName?: string;
+  driverEtaMinutes?: number;
+  currentDriverLocation?: Coordinates;
 }
 
 export interface CreateTripRequest extends RideEstimateRequest {

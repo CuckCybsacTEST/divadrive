@@ -150,6 +150,27 @@ const requestTrip = async (
   }
 };
 
+const loadActiveTrip = async (
+  session: AuthSession
+): Promise<RequestedTrip | null> => {
+  try {
+    const response = await fetch(`${API_BASE_URL}/trips/active`, {
+      headers: {
+        Authorization: `Bearer ${session.accessToken}`
+      }
+    });
+
+    if (!response.ok) {
+      throw new Error("active_trip_failed");
+    }
+
+    const payload = (await response.json()) as { trip: RequestedTrip | null };
+    return payload.trip;
+  } catch {
+    return null;
+  }
+};
+
 export default function App() {
   const [phone, setPhone] = useState("999111222");
   const [session, setSession] = useState<AuthSession | null>(null);
@@ -176,8 +197,9 @@ export default function App() {
       setLoading(true);
 
       try {
-        const [bootstrap, locationPermission] = await Promise.all([
+        const [bootstrap, trackedTrip, locationPermission] = await Promise.all([
           loadPassengerHome(session),
+          loadActiveTrip(session),
           Location.requestForegroundPermissionsAsync()
         ]);
 
@@ -189,7 +211,12 @@ export default function App() {
         setMapRegion(bootstrap.mapRegion);
         setSelectedDestination(bootstrap.suggestedDestinations[0] ?? null);
         setEstimate(null);
-        setActiveTrip(null);
+        setActiveTrip(trackedTrip);
+
+        if (trackedTrip) {
+          setEstimate(trackedTrip.estimate);
+          setSelectedDestination(trackedTrip.destination);
+        }
 
         if (locationPermission.status === "granted") {
           const currentPosition = await Location.getCurrentPositionAsync({});
@@ -246,6 +273,58 @@ export default function App() {
       isMounted = false;
     };
   }, [session]);
+
+  useEffect(() => {
+    if (!session || !activeTrip) {
+      return;
+    }
+
+    const interval = setInterval(() => {
+      void loadActiveTrip(session).then((trackedTrip) => {
+        if (!trackedTrip) {
+          return;
+        }
+
+        setActiveTrip(trackedTrip);
+        setHome((currentHome) =>
+          currentHome
+            ? {
+                ...currentHome,
+                activeTripStatus: trackedTrip.status
+              }
+            : currentHome
+        );
+      });
+    }, 4000);
+
+    return () => {
+      clearInterval(interval);
+    };
+  }, [activeTrip, session]);
+
+  useEffect(() => {
+    if (!origin || !selectedDestination) {
+      return;
+    }
+
+    const midpointLatitude =
+      (origin.latitude + selectedDestination.latitude) / 2;
+    const midpointLongitude =
+      (origin.longitude + selectedDestination.longitude) / 2;
+    const latitudeDelta =
+      Math.max(Math.abs(origin.latitude - selectedDestination.latitude), 0.02) *
+      2.2;
+    const longitudeDelta =
+      Math.max(Math.abs(origin.longitude - selectedDestination.longitude), 0.02) *
+      2.2;
+
+    setMapRegion({
+      latitude: midpointLatitude,
+      longitude: midpointLongitude,
+      latitudeDelta,
+      longitudeDelta
+    });
+  }, [origin, selectedDestination]);
 
   const handleSignIn = async () => {
     if (phone.trim().length < 9) {
@@ -393,6 +472,14 @@ export default function App() {
                 pinColor="#c54b23"
               />
             ) : null}
+            {activeTrip?.currentDriverLocation ? (
+              <Marker
+                coordinate={activeTrip.currentDriverLocation}
+                title={activeTrip.driverName ?? "Conductora asignada"}
+                description="En camino a tu punto de recojo"
+                pinColor="#1d8f6a"
+              />
+            ) : null}
           </MapView>
 
           <View style={styles.topOverlay}>
@@ -519,6 +606,16 @@ export default function App() {
                     <Text style={styles.item}>
                       Destino: {activeTrip.destination.label}
                     </Text>
+                    {activeTrip.driverName ? (
+                      <Text style={styles.item}>
+                        Conductora: {activeTrip.driverName}
+                      </Text>
+                    ) : null}
+                    {activeTrip.driverEtaMinutes ? (
+                      <Text style={styles.item}>
+                        ETA recojo: {activeTrip.driverEtaMinutes} min
+                      </Text>
+                    ) : null}
                   </>
                 ) : null}
               </View>

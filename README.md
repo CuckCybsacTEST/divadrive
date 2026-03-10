@@ -26,6 +26,7 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - home movil con mapa real como primer viewport
 - contratos compartidos de sesion y home en `packages/domain`
 - seleccion de destino sugerido, estimacion y solicitud inicial de viaje
+- matching base temporal y tracking inicial del viaje en `requested`, `matched` y `driver_en_route`
 
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
@@ -49,4 +50,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Implementar el siguiente slice vertical del producto: matching base, tracking de viaje y transiciones de estado `requested -> matched -> driver_en_route`.
+Implementar el siguiente slice vertical del producto: app de conductora, aceptacion real de solicitud y control manual de transiciones de viaje.
