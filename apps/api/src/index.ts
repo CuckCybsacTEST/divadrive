@@ -16,6 +16,7 @@ import {
   type IncidentStatusUpdate,
   type OperationalNotification,
   type OpsDashboardSnapshot,
+  type PlaceSearchResult,
   type CommercialMetricsSnapshot,
   type PassengerProfile,
   type PricingConfig,
@@ -28,6 +29,7 @@ import {
   type DriverTripStatusUpdate,
   type RideEstimate,
   type RideEstimateRequest,
+  type RidePoint,
   type RideTrip,
   type TripTimelineEvent,
   type TripTimelineSnapshot,
@@ -103,6 +105,9 @@ const rideEstimateSchema = z.object({
   origin: ridePointSchema,
   destination: ridePointSchema,
   promoCode: z.string().min(2).optional()
+});
+const placeSearchSchema = z.object({
+  query: z.string().min(1)
 });
 
 const createTripSchema = rideEstimateSchema.extend({
@@ -182,6 +187,34 @@ const requireAnyRole = (
 };
 
 const toRadians = (value: number) => (value * Math.PI) / 180;
+
+const searchablePlaces: RidePoint[] = [
+  ...DEFAULT_HOME_BOOTSTRAP.suggestedDestinations,
+  {
+    label: "Aeropuerto Jorge Chavez",
+    address: "Av. Elmer Faucett s/n, Callao",
+    latitude: -12.0219,
+    longitude: -77.1143
+  },
+  {
+    label: "Plaza San Miguel",
+    address: "Av. La Marina 2000, San Miguel",
+    latitude: -12.0789,
+    longitude: -77.0821
+  },
+  {
+    label: "Real Plaza Salaverry",
+    address: "Av. Gral. Salaverry 2370, Jesus Maria",
+    latitude: -12.0918,
+    longitude: -77.0529
+  },
+  {
+    label: "Barranco Centro",
+    address: "Av. Pedro de Osma 102, Barranco",
+    latitude: -12.1457,
+    longitude: -77.0205
+  }
+];
 
 const getBusinessSnapshot = (): BusinessRulesSnapshot => ({
   pricing: pricingConfig,
@@ -276,7 +309,9 @@ const estimateRide = (
   const distanceKm = Number(
     (earthRadiusKm * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))).toFixed(1)
   );
-  const durationMinutes = Math.max(8, Math.round(distanceKm * 3.2));
+  const trafficFactor =
+    Math.abs(destination.longitude - origin.longitude) > 0.04 ? 1.22 : 1.08;
+  const durationMinutes = Math.max(8, Math.round(distanceKm * 3.4 * trafficFactor));
   const subtotal = Math.max(
     pricingConfig.minimumFare,
     Number(
@@ -293,6 +328,16 @@ const estimateRide = (
   const appliedPromotion = buildAppliedPromotion(fareBeforeDiscount, passengerId, promoCode);
   const discountAmount = Number((appliedPromotion?.discountAmount ?? 0).toFixed(2));
   const estimatedFare = Number(Math.max(fareBeforeDiscount - discountAmount, 0).toFixed(2));
+  const routePoints = Array.from({ length: 6 }, (_, index) => {
+    const progress = index / 5;
+    const arc = Math.sin(progress * Math.PI) * 0.006;
+    return {
+      latitude:
+        origin.latitude + (destination.latitude - origin.latitude) * progress + arc / 2,
+      longitude:
+        origin.longitude + (destination.longitude - origin.longitude) * progress - arc
+    };
+  });
 
   return {
     currency: pricingConfig.currency,
@@ -305,7 +350,10 @@ const estimateRide = (
       discountAmount,
       total: estimatedFare
     },
-    appliedPromotion
+    appliedPromotion,
+    route: {
+      points: routePoints
+    }
   };
 };
 
@@ -608,6 +656,45 @@ app.get("/meta/trips", async () => {
     statuses: TRIP_STATUSES,
     events: TRIP_EVENT_TYPES
   };
+});
+
+app.get("/places/search", async (request, reply) => {
+  const session = requireRole(
+    requireSession(request.headers.authorization),
+    "passenger"
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  const parsedQuery = placeSearchSchema.safeParse(request.query);
+
+  if (!parsedQuery.success) {
+    reply.status(400);
+    return {
+      error: "invalid_places_query"
+    };
+  }
+
+  const normalizedQuery = parsedQuery.data.query.trim().toLowerCase();
+  const results = searchablePlaces
+    .filter(
+      (place) =>
+        place.label.toLowerCase().includes(normalizedQuery) ||
+        place.address.toLowerCase().includes(normalizedQuery)
+    )
+    .slice(0, 6);
+
+  const payload: PlaceSearchResult = {
+    query: parsedQuery.data.query,
+    results
+  };
+
+  return payload;
 });
 
 app.get("/ops/dashboard", async (request, reply) => {

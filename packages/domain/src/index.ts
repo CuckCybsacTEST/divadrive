@@ -125,6 +125,15 @@ export interface RidePoint extends Coordinates {
   address: string;
 }
 
+export interface RouteSegment {
+  points: Coordinates[];
+}
+
+export interface PlaceSearchResult {
+  query: string;
+  results: RidePoint[];
+}
+
 export interface HomeQuickAction {
   id: string;
   label: string;
@@ -153,6 +162,7 @@ export interface RideEstimate {
   estimatedFare: number;
   fareBreakdown: FareBreakdown;
   appliedPromotion: AppliedPromotion | null;
+  route: RouteSegment;
 }
 
 export interface FareBreakdown {

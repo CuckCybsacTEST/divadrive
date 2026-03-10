@@ -11,7 +11,7 @@ import {
   TextInput,
   View
 } from "react-native";
-import MapView, { Marker } from "react-native-maps";
+import MapView, { Marker, Polyline } from "react-native-maps";
 import * as Location from "expo-location";
 import {
   type DriverProfile,
@@ -26,12 +26,12 @@ import {
   type HomeBootstrap,
   type MapRegion,
   type OperationalNotification,
+  type PlaceSearchResult,
   type RideEstimate,
   type RideEstimateRequest,
   type RidePoint,
   type RideTrip,
-  type SignInPayload
-  ,
+  type SignInPayload,
   type TripTimelineEvent
 } from "@diva-drive/domain";
 
@@ -118,6 +118,8 @@ export default function App() {
   const [origin, setOrigin] = useState<RidePoint | null>(null);
   const [passengerHome, setPassengerHome] = useState<HomeBootstrap | null>(null);
   const [destination, setDestination] = useState<RidePoint | null>(null);
+  const [destinationQuery, setDestinationQuery] = useState("");
+  const [searchResults, setSearchResults] = useState<RidePoint[]>([]);
   const [promoCode, setPromoCode] = useState("");
   const [estimate, setEstimate] = useState<RideEstimate | null>(null);
   const [activeTrip, setActiveTrip] = useState<RideTrip | null>(null);
@@ -312,6 +314,31 @@ export default function App() {
       setMapRegion(regionFromPoints(origin, destination));
     }
   }, [activeTrip, destination, origin]);
+
+  useEffect(() => {
+    if (!session || session.user.role !== "passenger") {
+      return;
+    }
+
+    const trimmedQuery = destinationQuery.trim();
+    if (trimmedQuery.length < 2) {
+      setSearchResults([]);
+      return;
+    }
+
+    const timer = setTimeout(() => {
+      void api<PlaceSearchResult>(
+        `/places/search?query=${encodeURIComponent(trimmedQuery)}`,
+        session
+      )
+        .then((payload) => setSearchResults(payload.results))
+        .catch(() => setSearchResults([]));
+    }, 250);
+
+    return () => {
+      clearTimeout(timer);
+    };
+  }, [destinationQuery, session]);
 
   const handleSignIn = async () => {
     if (phone.trim().length < 9) {
@@ -517,6 +544,20 @@ export default function App() {
       <View style={styles.shell}>
         <View style={styles.mapWrap}>
           <MapView style={styles.map} initialRegion={mapRegion} region={mapRegion}>
+            {estimate?.route.points.length ? (
+              <Polyline
+                coordinates={estimate.route.points}
+                strokeColor="#c54b23"
+                strokeWidth={4}
+              />
+            ) : null}
+            {activeTrip?.estimate.route.points.length ? (
+              <Polyline
+                coordinates={activeTrip.estimate.route.points}
+                strokeColor="#1d8f6a"
+                strokeWidth={4}
+              />
+            ) : null}
             {session.user.role === "passenger" && origin ? <Marker coordinate={origin} title={origin.label} description={origin.address} /> : null}
             {session.user.role === "passenger" && destination ? <Marker coordinate={destination} title={destination.label} description={destination.address} pinColor="#c54b23" /> : null}
             {activeTrip ? <Marker coordinate={activeTrip.origin} title={`Recojo - ${activeTrip.passengerName}`} description={activeTrip.origin.address} /> : null}
@@ -552,11 +593,33 @@ export default function App() {
               </View>
               <View style={styles.card}>
                 <Text style={styles.heading}>Destino</Text>
+                <TextInput
+                  value={destinationQuery}
+                  onChangeText={setDestinationQuery}
+                  placeholder="Buscar destino en Lima"
+                  style={styles.input}
+                />
+                {searchResults.map((item) => (
+                  <Pressable
+                    key={`${item.label}-${item.address}`}
+                    onPress={() => {
+                      setDestination(item);
+                      setDestinationQuery(item.label);
+                      setEstimate(null);
+                      setSearchResults([]);
+                    }}
+                    style={styles.choice}
+                  >
+                    <Text style={styles.strong}>{item.label}</Text>
+                    <Text style={styles.muted}>{item.address}</Text>
+                  </Pressable>
+                ))}
                 {(passengerHome?.suggestedDestinations ?? DEFAULT_HOME_BOOTSTRAP.suggestedDestinations).map((item) => (
                   <Pressable
                     key={item.label}
                     onPress={() => {
                       setDestination(item);
+                      setDestinationQuery(item.label);
                       setEstimate(null);
                     }}
                     style={[styles.choice, destination?.label === item.label && styles.choiceActive]}
