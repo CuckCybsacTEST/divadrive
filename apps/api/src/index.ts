@@ -15,6 +15,7 @@ import {
   DRIVER_STATUS_FLOW,
   type IncidentStatusUpdate,
   type OpsDashboardSnapshot,
+  type CommercialMetricsSnapshot,
   type PassengerProfile,
   type PricingConfig,
   type PricingConfigUpdate,
@@ -27,6 +28,7 @@ import {
   type RideEstimate,
   type RideEstimateRequest,
   type RideTrip,
+  type TripHistorySnapshot,
   type TripIncident,
   TRIP_EVENT_TYPES,
   TRIP_STATUSES
@@ -472,6 +474,73 @@ const getOpsSnapshot = (): OpsDashboardSnapshot => {
   };
 };
 
+const getCommercialMetrics = (): CommercialMetricsSnapshot => {
+  const allTrips = Array.from(tripsById.values());
+  const completedTrips = allTrips.filter((trip) => trip.status === "trip_completed");
+  const cancelledTrips = allTrips.filter((trip) => trip.status === "cancelled");
+  const totalRevenue = Number(
+    completedTrips.reduce((sum, trip) => sum + trip.estimate.estimatedFare, 0).toFixed(2)
+  );
+  const totalDiscountAmount = Number(
+    allTrips
+      .reduce((sum, trip) => sum + trip.estimate.fareBreakdown.discountAmount, 0)
+      .toFixed(2)
+  );
+  const averageCompletedFare =
+    completedTrips.length === 0
+      ? 0
+      : Number((totalRevenue / completedTrips.length).toFixed(2));
+
+  const promoPerformanceMap = new Map<string, { uses: number; totalDiscountAmount: number }>();
+
+  for (const trip of allTrips) {
+    const appliedPromotion = trip.estimate.appliedPromotion;
+    if (!appliedPromotion) {
+      continue;
+    }
+
+    const current = promoPerformanceMap.get(appliedPromotion.code) ?? {
+      uses: 0,
+      totalDiscountAmount: 0
+    };
+
+    current.uses += 1;
+    current.totalDiscountAmount = Number(
+      (current.totalDiscountAmount + appliedPromotion.discountAmount).toFixed(2)
+    );
+    promoPerformanceMap.set(appliedPromotion.code, current);
+  }
+
+  return {
+    totalRevenue,
+    totalDiscountAmount,
+    completedTrips: completedTrips.length,
+    cancelledTrips: cancelledTrips.length,
+    averageCompletedFare,
+    promoPerformance: Array.from(promoPerformanceMap.entries())
+      .map(([code, value]) => ({
+        code,
+        uses: value.uses,
+        totalDiscountAmount: value.totalDiscountAmount
+      }))
+      .sort((a, b) => b.uses - a.uses)
+  };
+};
+
+const getTripHistoryForSession = (session: AuthSession): TripHistorySnapshot => {
+  const trips = Array.from(tripsById.values())
+    .filter((trip) =>
+      session.user.role === "driver"
+        ? trip.driverId === session.user.id
+        : trip.passengerId === session.user.id
+    )
+    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+
+  return {
+    trips
+  };
+};
+
 app.get("/health", async () => {
   return {
     service: SERVICE_NAME,
@@ -516,6 +585,22 @@ app.get("/ops/business", async (request, reply) => {
   }
 
   return getBusinessSnapshot();
+});
+
+app.get("/ops/commercial-metrics", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  return getCommercialMetrics();
 });
 
 app.get("/ops/directory", async (request, reply) => {
@@ -950,6 +1035,26 @@ app.get("/trips/active", async (request, reply) => {
         ? getDriverActiveTrip(session.user.id)
         : getPassengerActiveTrip(session.user.id)
   };
+});
+
+app.get("/trips/history", async (request, reply) => {
+  const session = requireSession(request.headers.authorization);
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  if (session.user.role !== "passenger" && session.user.role !== "driver") {
+    reply.status(403);
+    return {
+      error: "trip_history_not_available_for_role"
+    };
+  }
+
+  return getTripHistoryForSession(session);
 });
 
 app.post<{ Body: CreateIncidentPayload }>("/incidents", async (request, reply) => {

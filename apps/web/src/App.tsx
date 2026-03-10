@@ -2,6 +2,7 @@ import { type ReactNode, useEffect, useState } from "react";
 import {
   type BusinessRulesSnapshot,
   type AdminDirectorySnapshot,
+  type CommercialMetricsSnapshot,
   SERVICE_NAME,
   type AuthSession,
   type DriverApprovalStatus,
@@ -44,6 +45,15 @@ const emptyBusiness: BusinessRulesSnapshot = {
   auditLog: []
 };
 
+const emptyCommercialMetrics: CommercialMetricsSnapshot = {
+  totalRevenue: 0,
+  totalDiscountAmount: 0,
+  completedTrips: 0,
+  cancelledTrips: 0,
+  averageCompletedFare: 0,
+  promoPerformance: []
+};
+
 const formatMoney = (trip: RideTrip) =>
   `${trip.estimate.currency} ${trip.estimate.estimatedFare.toFixed(2)}`;
 
@@ -78,6 +88,8 @@ export default function App() {
     passengers: []
   });
   const [business, setBusiness] = useState<BusinessRulesSnapshot>(emptyBusiness);
+  const [commercialMetrics, setCommercialMetrics] =
+    useState<CommercialMetricsSnapshot>(emptyCommercialMetrics);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pricingDraft, setPricingDraft] = useState<PricingConfig>(emptyBusiness.pricing);
@@ -118,16 +130,18 @@ export default function App() {
 
     const loadDashboard = async () => {
       try {
-        const [nextSnapshot, nextDirectory, nextBusiness] = await Promise.all([
+        const [nextSnapshot, nextDirectory, nextBusiness, nextCommercialMetrics] = await Promise.all([
           authorizedFetch<OpsDashboardSnapshot>(session, "/ops/dashboard"),
           authorizedFetch<AdminDirectorySnapshot>(session, "/ops/directory"),
-          authorizedFetch<BusinessRulesSnapshot>(session, "/ops/business")
+          authorizedFetch<BusinessRulesSnapshot>(session, "/ops/business"),
+          authorizedFetch<CommercialMetricsSnapshot>(session, "/ops/commercial-metrics")
         ]);
 
         if (mounted) {
           setSnapshot(nextSnapshot);
           setDirectory(nextDirectory);
           setBusiness(nextBusiness);
+          setCommercialMetrics(nextCommercialMetrics);
           setPricingDraft(nextBusiness.pricing);
           setError(null);
         }
@@ -397,6 +411,14 @@ export default function App() {
         <StatCard label="Completados" value={snapshot.totals.completed} />
         <StatCard label="Cancelados" value={snapshot.totals.cancelled} />
         <StatCard label="Incidencias abiertas" value={snapshot.totals.openIncidents} />
+        <StatCard
+          label="Revenue"
+          value={`${business.pricing.currency} ${commercialMetrics.totalRevenue.toFixed(0)}`}
+        />
+        <StatCard
+          label="Descuentos"
+          value={`${business.pricing.currency} ${commercialMetrics.totalDiscountAmount.toFixed(0)}`}
+        />
       </section>
 
       {error ? <section className="banner error">{error}</section> : null}
@@ -776,12 +798,43 @@ export default function App() {
             ))
           )}
         </Panel>
+
+        <Panel title="Metricas comerciales" count={commercialMetrics.promoPerformance.length}>
+          <section className="tripCard active">
+            <p className="meta">
+              Revenue total: {business.pricing.currency} {commercialMetrics.totalRevenue.toFixed(2)}
+            </p>
+            <p className="meta">
+              Descuento total: {business.pricing.currency} {commercialMetrics.totalDiscountAmount.toFixed(2)}
+            </p>
+            <p className="meta">
+              Ticket promedio completado: {business.pricing.currency} {commercialMetrics.averageCompletedFare.toFixed(2)}
+            </p>
+            <p className="meta">Viajes completados: {commercialMetrics.completedTrips}</p>
+            <p className="meta">Viajes cancelados: {commercialMetrics.cancelledTrips}</p>
+          </section>
+          {commercialMetrics.promoPerformance.length === 0 ? (
+            <p className="empty">Aun no hay promociones utilizadas.</p>
+          ) : (
+            commercialMetrics.promoPerformance.map((promo) => (
+              <section key={promo.code} className="tripCard queue">
+                <div className="tripRow">
+                  <strong>{promo.code}</strong>
+                  <span className="badge">{promo.uses} usos</span>
+                </div>
+                <p className="meta">
+                  Descuento acumulado: {business.pricing.currency} {promo.totalDiscountAmount.toFixed(2)}
+                </p>
+              </section>
+            ))
+          )}
+        </Panel>
       </section>
     </main>
   );
 }
 
-function StatCard({ label, value }: { label: string; value: number }) {
+function StatCard({ label, value }: { label: string; value: number | string }) {
   return (
     <article className="stat">
       <span>{label}</span>

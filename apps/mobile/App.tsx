@@ -118,6 +118,7 @@ export default function App() {
   const [promoCode, setPromoCode] = useState("");
   const [estimate, setEstimate] = useState<RideEstimate | null>(null);
   const [activeTrip, setActiveTrip] = useState<RideTrip | null>(null);
+  const [tripHistory, setTripHistory] = useState<RideTrip[]>([]);
   const [driverQueue, setDriverQueue] = useState<RideTrip[]>([]);
   const [driverHome, setDriverHome] = useState<DriverQueueSummary | null>(null);
   const [driverProfile, setDriverProfile] = useState<DriverProfile | null>(null);
@@ -133,9 +134,10 @@ export default function App() {
       setLoading(true);
       try {
         if (session.user.role === "passenger") {
-          const [home, trip, permission] = await Promise.all([
+          const [home, trip, history, permission] = await Promise.all([
             api<HomeBootstrap>("/home/passenger", session).catch(() => DEFAULT_HOME_BOOTSTRAP),
             api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
+            api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] })),
             Location.requestForegroundPermissionsAsync()
           ]);
 
@@ -145,6 +147,7 @@ export default function App() {
 
           setPassengerHome(home);
           setActiveTrip(trip.trip);
+          setTripHistory(history.trips);
           setDestination(trip.trip?.destination ?? home.suggestedDestinations[0] ?? null);
           setEstimate(trip.trip?.estimate ?? null);
 
@@ -173,14 +176,15 @@ export default function App() {
             setOrigin(fallbackOrigin);
           }
         } else {
-          const [home, queue, trip] = await Promise.all([
+          const [home, queue, trip, history] = await Promise.all([
             api<DriverQueueSummary>("/home/driver", session).catch(() => ({
               queueSize: 0,
               activeTrip: null,
               driverProfile: null
             })),
             api<{ trips: RideTrip[] }>("/driver/trips/queue", session).catch(() => ({ trips: [] })),
-            api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null }))
+            api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
+            api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] }))
           ]);
 
           if (!mounted) {
@@ -191,6 +195,7 @@ export default function App() {
           setDriverProfile(home.driverProfile);
           setDriverQueue(queue.trips);
           setActiveTrip(trip.trip ?? home.activeTrip);
+          setTripHistory(history.trips);
         }
       } finally {
         if (mounted) {
@@ -212,8 +217,14 @@ export default function App() {
 
     const timer = setInterval(() => {
       if (session.user.role === "passenger") {
-        void api<{ trip: RideTrip | null }>("/trips/active", session)
-          .then((payload) => setActiveTrip(payload.trip))
+        void Promise.all([
+          api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
+          api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] }))
+        ])
+          .then(([payload, history]) => {
+            setActiveTrip(payload.trip);
+            setTripHistory(history.trips);
+          })
           .catch(() => undefined);
       } else {
         void Promise.all([
@@ -223,12 +234,14 @@ export default function App() {
             queueSize: 0,
             activeTrip: null,
             driverProfile: null
-          }))
-        ]).then(([queue, trip, home]) => {
+          })),
+          api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] }))
+        ]).then(([queue, trip, home, history]) => {
           setDriverQueue(queue.trips);
           setActiveTrip(trip.trip ?? home.activeTrip);
           setDriverHome(home);
           setDriverProfile(home.driverProfile);
+          setTripHistory(history.trips);
         });
       }
     }, 4000);
@@ -564,6 +577,24 @@ export default function App() {
                   </>
                 ) : null}
               </View>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Historial reciente</Text>
+                {tripHistory.length === 0 ? (
+                  <Text style={styles.muted}>Aun no hay viajes previos.</Text>
+                ) : (
+                  tripHistory.slice(0, 4).map((trip) => (
+                    <View key={trip.id} style={styles.choice}>
+                      <Text style={styles.strong}>
+                        {trip.origin.label} {"->"} {trip.destination.label}
+                      </Text>
+                      <Text style={styles.muted}>Estado: {trip.status}</Text>
+                      <Text style={styles.muted}>
+                        {trip.estimate.currency} {trip.estimate.estimatedFare.toFixed(2)}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </View>
             </>
           ) : (
             <>
@@ -646,6 +677,22 @@ export default function App() {
                   )}
                 </View>
               )}
+              <View style={styles.card}>
+                <Text style={styles.heading}>Historial reciente</Text>
+                {tripHistory.length === 0 ? (
+                  <Text style={styles.muted}>Aun no tienes viajes en historial.</Text>
+                ) : (
+                  tripHistory.slice(0, 4).map((trip) => (
+                    <View key={trip.id} style={styles.choice}>
+                      <Text style={styles.strong}>{trip.passengerName}</Text>
+                      <Text style={styles.muted}>
+                        {trip.origin.label} {"->"} {trip.destination.label}
+                      </Text>
+                      <Text style={styles.muted}>Estado: {trip.status}</Text>
+                    </View>
+                  ))
+                )}
+              </View>
             </>
           )}
           <View style={styles.card}>

@@ -244,6 +244,25 @@ export interface BusinessRulesSnapshot {
   auditLog: BusinessAuditEntry[];
 }
 
+export interface PromoPerformance {
+  code: string;
+  uses: number;
+  totalDiscountAmount: number;
+}
+
+export interface CommercialMetricsSnapshot {
+  totalRevenue: number;
+  totalDiscountAmount: number;
+  completedTrips: number;
+  cancelledTrips: number;
+  averageCompletedFare: number;
+  promoPerformance: PromoPerformance[];
+}
+
+export interface TripHistorySnapshot {
+  trips: RideTrip[];
+}
+
 export interface BusinessAuditEntry {
   id: string;
   actorId: string;
