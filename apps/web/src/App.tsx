@@ -1,7 +1,9 @@
 import { type ReactNode, useEffect, useState } from "react";
 import {
+  type AdminDirectorySnapshot,
   SERVICE_NAME,
   type AuthSession,
+  type DriverApprovalStatus,
   type IncidentStatus,
   type OpsDashboardSnapshot,
   type RideTrip
@@ -54,6 +56,10 @@ export default function App() {
   const [role, setRole] = useState<"operator" | "admin">("operator");
   const [session, setSession] = useState<AuthSession | null>(null);
   const [snapshot, setSnapshot] = useState<OpsDashboardSnapshot>(emptySnapshot);
+  const [directory, setDirectory] = useState<AdminDirectorySnapshot>({
+    drivers: [],
+    passengers: []
+  });
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
@@ -82,13 +88,14 @@ export default function App() {
 
     const loadDashboard = async () => {
       try {
-        const nextSnapshot = await authorizedFetch<OpsDashboardSnapshot>(
-          session,
-          "/ops/dashboard"
-        );
+        const [nextSnapshot, nextDirectory] = await Promise.all([
+          authorizedFetch<OpsDashboardSnapshot>(session, "/ops/dashboard"),
+          authorizedFetch<AdminDirectorySnapshot>(session, "/ops/directory")
+        ]);
 
         if (mounted) {
           setSnapshot(nextSnapshot);
+          setDirectory(nextDirectory);
           setError(null);
         }
       } catch {
@@ -169,6 +176,30 @@ export default function App() {
       setSnapshot(nextSnapshot);
     } catch {
       setError("No pudimos actualizar la incidencia.");
+    }
+  };
+
+  const handleDriverApproval = async (
+    driverId: string,
+    approvalStatus: DriverApprovalStatus
+  ) => {
+    if (!session) {
+      return;
+    }
+
+    try {
+      await authorizedFetch(session, `/ops/drivers/${driverId}/approval`, {
+        method: "POST",
+        body: JSON.stringify({ approvalStatus })
+      });
+
+      const nextDirectory = await authorizedFetch<AdminDirectorySnapshot>(
+        session,
+        "/ops/directory"
+      );
+      setDirectory(nextDirectory);
+    } catch {
+      setError("No pudimos actualizar la aprobacion de la conductora.");
     }
   };
 
@@ -306,6 +337,52 @@ export default function App() {
                     </button>
                   ))}
                 </div>
+              </section>
+            ))
+          )}
+        </Panel>
+
+        <Panel title="Conductoras" count={directory.drivers.length}>
+          {directory.drivers.length === 0 ? (
+            <p className="empty">No hay conductoras registradas.</p>
+          ) : (
+            directory.drivers.map((driver) => (
+              <section key={driver.id} className="tripCard active">
+                <div className="tripRow">
+                  <strong>{driver.fullName}</strong>
+                  <span className="badge">{driver.approvalStatus}</span>
+                </div>
+                <p className="meta">{driver.phone}</p>
+                <p className="meta">Licencia: {driver.licenseNumber}</p>
+                <p className="meta">Vehiculo: {driver.vehicleDescription}</p>
+                <div className="incidentActions">
+                  {(["approved", "rejected"] as const).map((status) => (
+                    <button
+                      key={status}
+                      className="secondaryAction"
+                      onClick={() => handleDriverApproval(driver.id, status)}
+                    >
+                      {status}
+                    </button>
+                  ))}
+                </div>
+              </section>
+            ))
+          )}
+        </Panel>
+
+        <Panel title="Pasajeros" count={directory.passengers.length}>
+          {directory.passengers.length === 0 ? (
+            <p className="empty">No hay pasajeros registrados.</p>
+          ) : (
+            directory.passengers.map((passenger) => (
+              <section key={passenger.id} className="tripCard done">
+                <div className="tripRow">
+                  <strong>{passenger.fullName}</strong>
+                  <span className="badge">passenger</span>
+                </div>
+                <p className="meta">{passenger.phone}</p>
+                <p className="meta">Ciudad: {passenger.city}</p>
               </section>
             ))
           )}

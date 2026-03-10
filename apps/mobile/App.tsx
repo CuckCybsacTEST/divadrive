@@ -14,6 +14,7 @@ import {
 import MapView, { Marker } from "react-native-maps";
 import * as Location from "expo-location";
 import {
+  type DriverProfile,
   DEFAULT_HOME_BOOTSTRAP,
   DRIVER_STATUS_FLOW,
   SERVICE_NAME,
@@ -118,6 +119,7 @@ export default function App() {
   const [activeTrip, setActiveTrip] = useState<RideTrip | null>(null);
   const [driverQueue, setDriverQueue] = useState<RideTrip[]>([]);
   const [driverHome, setDriverHome] = useState<DriverQueueSummary | null>(null);
+  const [driverProfile, setDriverProfile] = useState<DriverProfile | null>(null);
 
   useEffect(() => {
     if (!session) {
@@ -173,7 +175,8 @@ export default function App() {
           const [home, queue, trip] = await Promise.all([
             api<DriverQueueSummary>("/home/driver", session).catch(() => ({
               queueSize: 0,
-              activeTrip: null
+              activeTrip: null,
+              driverProfile: null
             })),
             api<{ trips: RideTrip[] }>("/driver/trips/queue", session).catch(() => ({ trips: [] })),
             api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null }))
@@ -184,6 +187,7 @@ export default function App() {
           }
 
           setDriverHome(home);
+          setDriverProfile(home.driverProfile);
           setDriverQueue(queue.trips);
           setActiveTrip(trip.trip ?? home.activeTrip);
         }
@@ -216,12 +220,14 @@ export default function App() {
           api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
           api<DriverQueueSummary>("/home/driver", session).catch(() => ({
             queueSize: 0,
-            activeTrip: null
+            activeTrip: null,
+            driverProfile: null
           }))
         ]).then(([queue, trip, home]) => {
           setDriverQueue(queue.trips);
           setActiveTrip(trip.trip ?? home.activeTrip);
           setDriverHome(home);
+          setDriverProfile(home.driverProfile);
         });
       }
     }, 4000);
@@ -319,7 +325,12 @@ export default function App() {
       setActiveTrip(trip);
       setDriverQueue((current) => current.filter((item) => item.id !== tripId));
     } catch {
-      Alert.alert("Solicitud no disponible", "Otra conductora pudo tomarla primero.");
+      Alert.alert(
+        "No pudimos aceptar la solicitud",
+        driverProfile?.approvalStatus !== "approved"
+          ? "Tu perfil aun no esta aprobado para operar."
+          : "Otra conductora pudo tomarla primero."
+      );
     } finally {
       setLoading(false);
     }
@@ -529,7 +540,21 @@ export default function App() {
                 <Text style={styles.muted}>
                   Home: {driverHome?.queueSize ?? driverQueue.length} solicitudes visibles
                 </Text>
+                <Text style={styles.muted}>
+                  Aprobacion: {driverProfile?.approvalStatus ?? "sin perfil"}
+                </Text>
               </View>
+              {driverProfile ? (
+                <View style={styles.card}>
+                  <Text style={styles.heading}>Onboarding documental</Text>
+                  <Text style={styles.strong}>{driverProfile.fullName}</Text>
+                  <Text style={styles.muted}>Licencia: {driverProfile.licenseNumber}</Text>
+                  <Text style={styles.muted}>Vehiculo: {driverProfile.vehicleDescription}</Text>
+                  <Text style={styles.muted}>
+                    Estado: {driverProfile.approvalStatus}
+                  </Text>
+                </View>
+              ) : null}
               {activeTrip ? (
                 <>
                   <View style={styles.card}>
@@ -573,7 +598,13 @@ export default function App() {
                           {trip.origin.label} {"->"} {trip.destination.label}
                         </Text>
                         <Text style={styles.muted}>{trip.estimate.currency} {trip.estimate.estimatedFare.toFixed(2)}</Text>
-                        <Pressable onPress={() => handleAcceptTrip(trip.id)} style={styles.button}>
+                        <Pressable
+                          onPress={() => handleAcceptTrip(trip.id)}
+                          style={[
+                            styles.button,
+                            driverProfile?.approvalStatus !== "approved" && styles.disabledButton
+                          ]}
+                        >
                           <Text style={styles.buttonText}>Aceptar solicitud</Text>
                         </Pressable>
                       </View>
@@ -610,6 +641,7 @@ const styles = StyleSheet.create({
   chipTextActive: { color: "#a53a17", fontWeight: "700" },
   input: { borderWidth: 1, borderColor: "#e3d8ce", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14, backgroundColor: "#fff" },
   button: { marginTop: 12, minHeight: 50, borderRadius: 14, backgroundColor: "#c54b23", alignItems: "center", justifyContent: "center" },
+  disabledButton: { opacity: 0.45 },
   altButton: { marginTop: 12, minHeight: 50, borderRadius: 14, borderWidth: 1, borderColor: "#c54b23", alignItems: "center", justifyContent: "center" },
   ghostButton: { marginTop: 12, minHeight: 48, borderRadius: 14, borderWidth: 1, borderColor: "#d3b7aa", alignItems: "center", justifyContent: "center", backgroundColor: "#fff7f3" },
   buttonText: { color: "#fffaf6", fontWeight: "800", fontSize: 16 },

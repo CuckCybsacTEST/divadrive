@@ -63,6 +63,28 @@ export interface SessionUser {
   phone: string;
 }
 
+export type DriverApprovalStatus = "pending" | "approved" | "rejected";
+
+export interface DriverProfile {
+  id: string;
+  fullName: string;
+  phone: string;
+  city: string;
+  approvalStatus: DriverApprovalStatus;
+  documentsSubmitted: boolean;
+  licenseNumber: string;
+  vehicleDescription: string;
+  createdAt: string;
+}
+
+export interface PassengerProfile {
+  id: string;
+  fullName: string;
+  phone: string;
+  city: string;
+  createdAt: string;
+}
+
 export interface AuthSession {
   accessToken: string;
   user: SessionUser;
@@ -153,6 +175,7 @@ export interface CreateTripRequest extends RideEstimateRequest {
 export interface DriverQueueSummary {
   queueSize: number;
   activeTrip: RideTrip | null;
+  driverProfile: DriverProfile | null;
 }
 
 export interface OpsDashboardSnapshot {
@@ -168,6 +191,15 @@ export interface OpsDashboardSnapshot {
     cancelled: number;
     openIncidents: number;
   };
+}
+
+export interface AdminDirectorySnapshot {
+  drivers: DriverProfile[];
+  passengers: PassengerProfile[];
+}
+
+export interface DriverApprovalUpdate {
+  approvalStatus: DriverApprovalStatus;
 }
 
 export interface IncidentStatusUpdate {

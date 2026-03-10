@@ -2,12 +2,16 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { z } from "zod";
 import {
+  type AdminDirectorySnapshot,
   type CancelTripPayload,
   type CreateIncidentPayload,
   DEFAULT_HOME_BOOTSTRAP,
+  type DriverApprovalUpdate,
+  type DriverProfile,
   DRIVER_STATUS_FLOW,
   type IncidentStatusUpdate,
   type OpsDashboardSnapshot,
+  type PassengerProfile,
   SERVICE_NAME,
   type ActiveTripStatus,
   type AuthSession,
@@ -21,6 +25,7 @@ import {
 } from "@diva-drive/domain";
 import { readIncidents, writeIncidents } from "./incident-store.js";
 import { readTrips, writeTrips } from "./trip-store.js";
+import { readUsers, writeUsers } from "./user-store.js";
 
 const app = Fastify({
   logger: true
@@ -33,6 +38,8 @@ await app.register(cors, {
 const sessions = new Map<string, AuthSession>();
 const tripsById = new Map<string, RideTrip>();
 const incidentsById = new Map<string, TripIncident>();
+const driverProfilesById = new Map<string, DriverProfile>();
+const passengerProfilesById = new Map<string, PassengerProfile>();
 
 const persistTrips = async () => {
   await writeTrips(Array.from(tripsById.values()));
@@ -40,6 +47,13 @@ const persistTrips = async () => {
 
 const persistIncidents = async () => {
   await writeIncidents(Array.from(incidentsById.values()));
+};
+
+const persistUsers = async () => {
+  await writeUsers({
+    drivers: Array.from(driverProfilesById.values()),
+    passengers: Array.from(passengerProfilesById.values())
+  });
 };
 
 const signInSchema = z.object({
@@ -78,6 +92,9 @@ const driverStatusSchema = z.object({
 });
 const incidentStatusSchema = z.object({
   status: z.enum(["open", "reviewing", "resolved"])
+});
+const driverApprovalSchema = z.object({
+  approvalStatus: z.enum(["pending", "approved", "rejected"])
 });
 
 const requireSession = (authorizationHeader?: string) => {
@@ -213,6 +230,34 @@ const createSession = (payload: z.infer<typeof signInSchema>): AuthSession => {
   return session;
 };
 
+const ensureProfileForSession = async (session: AuthSession) => {
+  if (session.user.role === "driver" && !driverProfilesById.has(session.user.id)) {
+    driverProfilesById.set(session.user.id, {
+      id: session.user.id,
+      fullName: session.user.fullName,
+      phone: session.user.phone,
+      city: DEFAULT_HOME_BOOTSTRAP.city,
+      approvalStatus: "pending",
+      documentsSubmitted: true,
+      licenseNumber: `LIC-${session.user.id.slice(-4)}`,
+      vehicleDescription: "Sedan blanco - onboarding inicial",
+      createdAt: new Date().toISOString()
+    });
+    await persistUsers();
+  }
+
+  if (session.user.role === "passenger" && !passengerProfilesById.has(session.user.id)) {
+    passengerProfilesById.set(session.user.id, {
+      id: session.user.id,
+      fullName: session.user.fullName,
+      phone: session.user.phone,
+      city: DEFAULT_HOME_BOOTSTRAP.city,
+      createdAt: new Date().toISOString()
+    });
+    await persistUsers();
+  }
+};
+
 const getPassengerActiveTrip = (passengerId: string) => {
   const trips = Array.from(tripsById.values()).filter(
     (trip) =>
@@ -318,6 +363,31 @@ app.get("/ops/dashboard", async (request, reply) => {
   return getOpsSnapshot();
 });
 
+app.get("/ops/directory", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  const payload: AdminDirectorySnapshot = {
+    drivers: Array.from(driverProfilesById.values()).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt)
+    ),
+    passengers: Array.from(passengerProfilesById.values()).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt)
+    )
+  };
+
+  return payload;
+});
+
 app.get("/ops/trips", async (request, reply) => {
   const session = requireAnyRole(
     requireSession(request.headers.authorization),
@@ -402,6 +472,50 @@ app.post<{ Params: { incidentId: string }; Body: IncidentStatusUpdate }>(
   }
 );
 
+app.post<{ Params: { driverId: string }; Body: DriverApprovalUpdate }>(
+  "/ops/drivers/:driverId/approval",
+  async (request, reply) => {
+    const session = requireAnyRole(
+      requireSession(request.headers.authorization),
+      ["operator", "admin"]
+    );
+
+    if (!session) {
+      reply.status(401);
+      return {
+        error: "invalid_session"
+      };
+    }
+
+    const parsedPayload = driverApprovalSchema.safeParse(request.body);
+
+    if (!parsedPayload.success) {
+      reply.status(400);
+      return {
+        error: "invalid_driver_approval_payload"
+      };
+    }
+
+    const profile = driverProfilesById.get(request.params.driverId);
+
+    if (!profile) {
+      reply.status(404);
+      return {
+        error: "driver_not_found"
+      };
+    }
+
+    const updatedProfile: DriverProfile = {
+      ...profile,
+      approvalStatus: parsedPayload.data.approvalStatus
+    };
+
+    driverProfilesById.set(updatedProfile.id, updatedProfile);
+    await persistUsers();
+    return updatedProfile;
+  }
+);
+
 app.post("/auth/sign-in", async (request, reply) => {
   const parsedPayload = signInSchema.safeParse(request.body);
 
@@ -412,7 +526,9 @@ app.post("/auth/sign-in", async (request, reply) => {
     };
   }
 
-  return createSession(parsedPayload.data);
+  const session = createSession(parsedPayload.data);
+  await ensureProfileForSession(session);
+  return session;
 });
 
 app.get("/auth/session", async (request, reply) => {
@@ -463,7 +579,8 @@ app.get("/home/driver", async (request, reply) => {
   return {
     city: DEFAULT_HOME_BOOTSTRAP.city,
     queueSize: getDriverQueue().length,
-    activeTrip: getDriverActiveTrip(session.user.id)
+    activeTrip: getDriverActiveTrip(session.user.id),
+    driverProfile: driverProfilesById.get(session.user.id) ?? null
   };
 });
 
@@ -701,6 +818,15 @@ app.post<{ Params: { tripId: string } }>(
       };
     }
 
+    const driverProfile = driverProfilesById.get(session.user.id);
+
+    if (!driverProfile || driverProfile.approvalStatus !== "approved") {
+      reply.status(403);
+      return {
+        error: "driver_not_approved"
+      };
+    }
+
     const trip = tripsById.get(request.params.tripId);
 
     if (!trip || trip.status !== "requested") {
@@ -795,6 +921,13 @@ const start = async () => {
     const persistedIncidents = await readIncidents();
     for (const incident of persistedIncidents) {
       incidentsById.set(incident.id, incident);
+    }
+    const persistedUsers = await readUsers();
+    for (const driver of persistedUsers.drivers) {
+      driverProfilesById.set(driver.id, driver);
+    }
+    for (const passenger of persistedUsers.passengers) {
+      passengerProfilesById.set(passenger.id, passenger);
     }
     await app.listen({
       host: "0.0.0.0",
