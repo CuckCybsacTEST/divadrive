@@ -40,6 +40,16 @@ export interface AuditEvent {
   actorId?: string;
 }
 
+export interface TripTimelineEvent {
+  id: string;
+  tripId: string;
+  type: TripEventType;
+  occurredAt: string;
+  actorId?: string;
+  actorRole?: UserRole;
+  message: string;
+}
+
 export type IncidentSeverity = "low" | "medium" | "high";
 export type IncidentStatus = "open" | "reviewing" | "resolved";
 export type IncidentReporterRole = "passenger" | "driver" | "operator";
@@ -127,6 +137,7 @@ export interface HomeBootstrap {
   quickActions: HomeQuickAction[];
   suggestedDestinations: RidePoint[];
   activeTripStatus: TripStatus | null;
+  notifications?: OperationalNotification[];
 }
 
 export interface RideEstimateRequest {
@@ -221,6 +232,7 @@ export interface DriverQueueSummary {
   queueSize: number;
   activeTrip: RideTrip | null;
   driverProfile: DriverProfile | null;
+  notifications?: OperationalNotification[];
 }
 
 export interface OpsDashboardSnapshot {
@@ -261,6 +273,17 @@ export interface CommercialMetricsSnapshot {
 
 export interface TripHistorySnapshot {
   trips: RideTrip[];
+}
+
+export interface TripTimelineSnapshot {
+  events: TripTimelineEvent[];
+}
+
+export interface OperationalNotification {
+  id: string;
+  level: "info" | "success" | "warning";
+  message: string;
+  createdAt: string;
 }
 
 export interface BusinessAuditEntry {

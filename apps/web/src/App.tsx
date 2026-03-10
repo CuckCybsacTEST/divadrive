@@ -10,7 +10,8 @@ import {
   type OpsDashboardSnapshot,
   type PricingConfig,
   type PromotionUpsertPayload,
-  type RideTrip
+  type RideTrip,
+  type TripTimelineEvent
 } from "@diva-drive/domain";
 
 const API_BASE_URL = "http://127.0.0.1:4000";
@@ -54,6 +55,8 @@ const emptyCommercialMetrics: CommercialMetricsSnapshot = {
   promoPerformance: []
 };
 
+const emptyEventStream: TripTimelineEvent[] = [];
+
 const formatMoney = (trip: RideTrip) =>
   `${trip.estimate.currency} ${trip.estimate.estimatedFare.toFixed(2)}`;
 
@@ -90,6 +93,7 @@ export default function App() {
   const [business, setBusiness] = useState<BusinessRulesSnapshot>(emptyBusiness);
   const [commercialMetrics, setCommercialMetrics] =
     useState<CommercialMetricsSnapshot>(emptyCommercialMetrics);
+  const [eventStream, setEventStream] = useState<TripTimelineEvent[]>(emptyEventStream);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pricingDraft, setPricingDraft] = useState<PricingConfig>(emptyBusiness.pricing);
@@ -130,11 +134,13 @@ export default function App() {
 
     const loadDashboard = async () => {
       try {
-        const [nextSnapshot, nextDirectory, nextBusiness, nextCommercialMetrics] = await Promise.all([
+        const [nextSnapshot, nextDirectory, nextBusiness, nextCommercialMetrics, nextEventStream] =
+          await Promise.all([
           authorizedFetch<OpsDashboardSnapshot>(session, "/ops/dashboard"),
           authorizedFetch<AdminDirectorySnapshot>(session, "/ops/directory"),
           authorizedFetch<BusinessRulesSnapshot>(session, "/ops/business"),
-          authorizedFetch<CommercialMetricsSnapshot>(session, "/ops/commercial-metrics")
+          authorizedFetch<CommercialMetricsSnapshot>(session, "/ops/commercial-metrics"),
+          authorizedFetch<{ events: TripTimelineEvent[] }>(session, "/ops/events")
         ]);
 
         if (mounted) {
@@ -142,6 +148,7 @@ export default function App() {
           setDirectory(nextDirectory);
           setBusiness(nextBusiness);
           setCommercialMetrics(nextCommercialMetrics);
+          setEventStream(nextEventStream.events);
           setPricingDraft(nextBusiness.pricing);
           setError(null);
         }
@@ -825,6 +832,24 @@ export default function App() {
                 <p className="meta">
                   Descuento acumulado: {business.pricing.currency} {promo.totalDiscountAmount.toFixed(2)}
                 </p>
+              </section>
+            ))
+          )}
+        </Panel>
+
+        <Panel title="Feed operativo" count={eventStream.length}>
+          {eventStream.length === 0 ? (
+            <p className="empty">Aun no hay eventos operativos.</p>
+          ) : (
+            eventStream.map((event) => (
+              <section key={event.id} className="tripCard active">
+                <div className="tripRow">
+                  <strong>{event.type}</strong>
+                  <span className="badge">{event.actorRole ?? "system"}</span>
+                </div>
+                <p className="route">{event.message}</p>
+                <p className="meta">Trip: {event.tripId}</p>
+                <p className="meta">{new Date(event.occurredAt).toLocaleString()}</p>
               </section>
             ))
           )}

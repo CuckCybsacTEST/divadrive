@@ -25,11 +25,14 @@ import {
   type DriverTripStatusUpdate,
   type HomeBootstrap,
   type MapRegion,
+  type OperationalNotification,
   type RideEstimate,
   type RideEstimateRequest,
   type RidePoint,
   type RideTrip,
   type SignInPayload
+  ,
+  type TripTimelineEvent
 } from "@diva-drive/domain";
 
 const API_BASE_URL = "http://10.0.2.2:4000";
@@ -119,6 +122,8 @@ export default function App() {
   const [estimate, setEstimate] = useState<RideEstimate | null>(null);
   const [activeTrip, setActiveTrip] = useState<RideTrip | null>(null);
   const [tripHistory, setTripHistory] = useState<RideTrip[]>([]);
+  const [notifications, setNotifications] = useState<OperationalNotification[]>([]);
+  const [timelineEvents, setTimelineEvents] = useState<TripTimelineEvent[]>([]);
   const [driverQueue, setDriverQueue] = useState<RideTrip[]>([]);
   const [driverHome, setDriverHome] = useState<DriverQueueSummary | null>(null);
   const [driverProfile, setDriverProfile] = useState<DriverProfile | null>(null);
@@ -148,8 +153,20 @@ export default function App() {
           setPassengerHome(home);
           setActiveTrip(trip.trip);
           setTripHistory(history.trips);
+          setNotifications(home.notifications ?? []);
           setDestination(trip.trip?.destination ?? home.suggestedDestinations[0] ?? null);
           setEstimate(trip.trip?.estimate ?? null);
+          if (trip.trip) {
+            const timeline = await api<{ events: TripTimelineEvent[] }>(
+              `/trips/${trip.trip.id}/events`,
+              session
+            ).catch(() => ({ events: [] }));
+            if (mounted) {
+              setTimelineEvents(timeline.events);
+            }
+          } else {
+            setTimelineEvents([]);
+          }
 
           const fallbackOrigin: RidePoint = trip.trip?.origin ?? {
             label: "Punto de recojo",
@@ -180,7 +197,8 @@ export default function App() {
             api<DriverQueueSummary>("/home/driver", session).catch(() => ({
               queueSize: 0,
               activeTrip: null,
-              driverProfile: null
+              driverProfile: null,
+              notifications: []
             })),
             api<{ trips: RideTrip[] }>("/driver/trips/queue", session).catch(() => ({ trips: [] })),
             api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
@@ -196,6 +214,19 @@ export default function App() {
           setDriverQueue(queue.trips);
           setActiveTrip(trip.trip ?? home.activeTrip);
           setTripHistory(history.trips);
+          setNotifications(home.notifications ?? []);
+          const activeDriverTrip = trip.trip ?? home.activeTrip;
+          if (activeDriverTrip) {
+            const timeline = await api<{ events: TripTimelineEvent[] }>(
+              `/trips/${activeDriverTrip.id}/events`,
+              session
+            ).catch(() => ({ events: [] }));
+            if (mounted) {
+              setTimelineEvents(timeline.events);
+            }
+          } else {
+            setTimelineEvents([]);
+          }
         }
       } finally {
         if (mounted) {
@@ -219,11 +250,22 @@ export default function App() {
       if (session.user.role === "passenger") {
         void Promise.all([
           api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
-          api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] }))
+          api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] })),
+          api<HomeBootstrap>("/home/passenger", session).catch(() => DEFAULT_HOME_BOOTSTRAP)
         ])
-          .then(([payload, history]) => {
+          .then(async ([payload, history, home]) => {
             setActiveTrip(payload.trip);
             setTripHistory(history.trips);
+            setNotifications(home.notifications ?? []);
+            if (payload.trip) {
+              const timeline = await api<{ events: TripTimelineEvent[] }>(
+                `/trips/${payload.trip.id}/events`,
+                session
+              ).catch(() => ({ events: [] }));
+              setTimelineEvents(timeline.events);
+            } else {
+              setTimelineEvents([]);
+            }
           })
           .catch(() => undefined);
       } else {
@@ -233,15 +275,27 @@ export default function App() {
           api<DriverQueueSummary>("/home/driver", session).catch(() => ({
             queueSize: 0,
             activeTrip: null,
-            driverProfile: null
+            driverProfile: null,
+            notifications: []
           })),
           api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] }))
-        ]).then(([queue, trip, home, history]) => {
+        ]).then(async ([queue, trip, home, history]) => {
           setDriverQueue(queue.trips);
           setActiveTrip(trip.trip ?? home.activeTrip);
           setDriverHome(home);
           setDriverProfile(home.driverProfile);
           setTripHistory(history.trips);
+          setNotifications(home.notifications ?? []);
+          const activeDriverTrip = trip.trip ?? home.activeTrip;
+          if (activeDriverTrip) {
+            const timeline = await api<{ events: TripTimelineEvent[] }>(
+              `/trips/${activeDriverTrip.id}/events`,
+              session
+            ).catch(() => ({ events: [] }));
+            setTimelineEvents(timeline.events);
+          } else {
+            setTimelineEvents([]);
+          }
         });
       }
     }, 4000);
@@ -595,6 +649,37 @@ export default function App() {
                   ))
                 )}
               </View>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Notificaciones</Text>
+                {notifications.length === 0 ? (
+                  <Text style={styles.muted}>Sin novedades operativas por ahora.</Text>
+                ) : (
+                  notifications.map((notification) => (
+                    <View key={notification.id} style={styles.choice}>
+                      <Text style={styles.strong}>{notification.message}</Text>
+                      <Text style={styles.muted}>
+                        {notification.level} - {new Date(notification.createdAt).toLocaleTimeString()}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Timeline del viaje</Text>
+                {timelineEvents.length === 0 ? (
+                  <Text style={styles.muted}>Aun no hay eventos para mostrar.</Text>
+                ) : (
+                  timelineEvents.map((event) => (
+                    <View key={event.id} style={styles.choice}>
+                      <Text style={styles.strong}>{event.type}</Text>
+                      <Text style={styles.muted}>{event.message}</Text>
+                      <Text style={styles.muted}>
+                        {new Date(event.occurredAt).toLocaleTimeString()}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </View>
             </>
           ) : (
             <>
@@ -689,6 +774,37 @@ export default function App() {
                         {trip.origin.label} {"->"} {trip.destination.label}
                       </Text>
                       <Text style={styles.muted}>Estado: {trip.status}</Text>
+                    </View>
+                  ))
+                )}
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Notificaciones</Text>
+                {notifications.length === 0 ? (
+                  <Text style={styles.muted}>Sin novedades operativas por ahora.</Text>
+                ) : (
+                  notifications.map((notification) => (
+                    <View key={notification.id} style={styles.choice}>
+                      <Text style={styles.strong}>{notification.message}</Text>
+                      <Text style={styles.muted}>
+                        {notification.level} - {new Date(notification.createdAt).toLocaleTimeString()}
+                      </Text>
+                    </View>
+                  ))
+                )}
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Timeline del viaje</Text>
+                {timelineEvents.length === 0 ? (
+                  <Text style={styles.muted}>Aun no hay eventos para mostrar.</Text>
+                ) : (
+                  timelineEvents.map((event) => (
+                    <View key={event.id} style={styles.choice}>
+                      <Text style={styles.strong}>{event.type}</Text>
+                      <Text style={styles.muted}>{event.message}</Text>
+                      <Text style={styles.muted}>
+                        {new Date(event.occurredAt).toLocaleTimeString()}
+                      </Text>
                     </View>
                   ))
                 )}

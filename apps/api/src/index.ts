@@ -14,6 +14,7 @@ import {
   type DriverProfile,
   DRIVER_STATUS_FLOW,
   type IncidentStatusUpdate,
+  type OperationalNotification,
   type OpsDashboardSnapshot,
   type CommercialMetricsSnapshot,
   type PassengerProfile,
@@ -28,12 +29,15 @@ import {
   type RideEstimate,
   type RideEstimateRequest,
   type RideTrip,
+  type TripTimelineEvent,
+  type TripTimelineSnapshot,
   type TripHistorySnapshot,
   type TripIncident,
   TRIP_EVENT_TYPES,
   TRIP_STATUSES
 } from "@diva-drive/domain";
 import { readBusinessRules, writeBusinessRules } from "./business-store.js";
+import { readEvents, writeEvents } from "./event-store.js";
 import { readIncidents, writeIncidents } from "./incident-store.js";
 import { readTrips, writeTrips } from "./trip-store.js";
 import { readUsers, writeUsers } from "./user-store.js";
@@ -49,6 +53,7 @@ await app.register(cors, {
 const sessions = new Map<string, AuthSession>();
 const tripsById = new Map<string, RideTrip>();
 const incidentsById = new Map<string, TripIncident>();
+const tripEventsById = new Map<string, TripTimelineEvent>();
 const driverProfilesById = new Map<string, DriverProfile>();
 const passengerProfilesById = new Map<string, PassengerProfile>();
 let pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG;
@@ -61,6 +66,10 @@ const persistTrips = async () => {
 
 const persistIncidents = async () => {
   await writeIncidents(Array.from(incidentsById.values()));
+};
+
+const persistEvents = async () => {
+  await writeEvents(Array.from(tripEventsById.values()));
 };
 
 const persistUsers = async () => {
@@ -441,6 +450,52 @@ const patchTrip = (tripId: string, patch: Partial<RideTrip>) => {
   return nextTrip;
 };
 
+const createTripEvent = async (event: Omit<TripTimelineEvent, "id">) => {
+  const nextEvent: TripTimelineEvent = {
+    id: `event-${Date.now()}-${tripEventsById.size + 1}`,
+    ...event
+  };
+
+  tripEventsById.set(nextEvent.id, nextEvent);
+  await persistEvents();
+  return nextEvent;
+};
+
+const getTripTimeline = (tripId: string): TripTimelineSnapshot => ({
+  events: Array.from(tripEventsById.values())
+    .filter((event) => event.tripId === tripId)
+    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+});
+
+const getOpsEventStream = () =>
+  Array.from(tripEventsById.values())
+    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+    .slice(0, 30);
+
+const getRecentOperationalNotifications = (
+  session: AuthSession,
+  activeTrip: RideTrip | null
+): OperationalNotification[] => {
+  if (!activeTrip) {
+    return [];
+  }
+
+  return getTripTimeline(activeTrip.id).events.slice(0, 3).map((event) => ({
+    id: event.id,
+    level:
+      event.type === "incident_created"
+        ? "warning"
+        : event.type === "trip_completed"
+          ? "success"
+          : "info",
+    message:
+      session.user.role === "driver" && event.actorRole === "driver"
+        ? `Tu actualizacion: ${event.message}`
+        : event.message,
+    createdAt: event.occurredAt
+  }));
+};
+
 const getOpsSnapshot = (): OpsDashboardSnapshot => {
   const allTrips = Array.from(tripsById.values()).sort((a, b) =>
     b.requestedAt.localeCompare(a.requestedAt)
@@ -601,6 +656,24 @@ app.get("/ops/commercial-metrics", async (request, reply) => {
   }
 
   return getCommercialMetrics();
+});
+
+app.get("/ops/events", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  return {
+    events: getOpsEventStream()
+  };
 });
 
 app.get("/ops/directory", async (request, reply) => {
@@ -921,7 +994,11 @@ app.get("/home/passenger", async (request, reply) => {
 
   return {
     ...DEFAULT_HOME_BOOTSTRAP,
-    activeTripStatus: getPassengerActiveTrip(session.user.id)?.status ?? null
+    activeTripStatus: getPassengerActiveTrip(session.user.id)?.status ?? null,
+    notifications: getRecentOperationalNotifications(
+      session,
+      getPassengerActiveTrip(session.user.id)
+    )
   };
 });
 
@@ -942,7 +1019,11 @@ app.get("/home/driver", async (request, reply) => {
     city: DEFAULT_HOME_BOOTSTRAP.city,
     queueSize: getDriverQueue().length,
     activeTrip: getDriverActiveTrip(session.user.id),
-    driverProfile: driverProfilesById.get(session.user.id) ?? null
+    driverProfile: driverProfilesById.get(session.user.id) ?? null,
+    notifications: getRecentOperationalNotifications(
+      session,
+      getDriverActiveTrip(session.user.id)
+    )
   };
 });
 
@@ -1015,6 +1096,14 @@ app.post("/trips", async (request, reply) => {
 
   tripsById.set(trip.id, trip);
   await persistTrips();
+  await createTripEvent({
+    tripId: trip.id,
+    type: "trip_requested",
+    occurredAt: trip.requestedAt,
+    actorId: session.user.id,
+    actorRole: session.user.role,
+    message: `Solicitud creada desde ${trip.origin.label} hacia ${trip.destination.label}`
+  });
   reply.status(201);
   return trip;
 });
@@ -1055,6 +1144,42 @@ app.get("/trips/history", async (request, reply) => {
   }
 
   return getTripHistoryForSession(session);
+});
+
+app.get<{ Params: { tripId: string } }>("/trips/:tripId/events", async (request, reply) => {
+  const session = requireSession(request.headers.authorization);
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  const trip = tripsById.get(request.params.tripId);
+
+  if (!trip) {
+    reply.status(404);
+    return {
+      error: "trip_not_found"
+    };
+  }
+
+  const canSeeTrip =
+    session.user.role === "passenger"
+      ? trip.passengerId === session.user.id
+      : session.user.role === "driver"
+        ? trip.driverId === session.user.id
+        : true;
+
+  if (!canSeeTrip) {
+    reply.status(403);
+    return {
+      error: "trip_events_not_allowed"
+    };
+  }
+
+  return getTripTimeline(trip.id);
 });
 
 app.post<{ Body: CreateIncidentPayload }>("/incidents", async (request, reply) => {
@@ -1100,6 +1225,14 @@ app.post<{ Body: CreateIncidentPayload }>("/incidents", async (request, reply) =
 
   incidentsById.set(incident.id, incident);
   await persistIncidents();
+  await createTripEvent({
+    tripId: trip.id,
+    type: "incident_created",
+    occurredAt: incident.createdAt,
+    actorId: session.user.id,
+    actorRole: session.user.role,
+    message: `Incidencia reportada por ${session.user.role}: ${incident.category}`
+  });
   reply.status(201);
   return incident;
 });
@@ -1157,6 +1290,16 @@ app.post<{ Params: { tripId: string }; Body: CancelTripPayload }>(
     });
 
     await persistTrips();
+    if (cancelledTrip) {
+      await createTripEvent({
+        tripId: cancelledTrip.id,
+        type: "trip_cancelled",
+        occurredAt: new Date().toISOString(),
+        actorId: session.user.id,
+        actorRole: session.user.role,
+        message: `Viaje cancelado por ${session.user.role}`
+      });
+    }
     return cancelledTrip;
   }
 );
@@ -1227,6 +1370,16 @@ app.post<{ Params: { tripId: string } }>(
       currentDriverLocation: buildDriverLocation(trip, "matched")
     });
     await persistTrips();
+    if (acceptedTrip) {
+      await createTripEvent({
+        tripId: acceptedTrip.id,
+        type: "trip_matched",
+        occurredAt: new Date().toISOString(),
+        actorId: session.user.id,
+        actorRole: session.user.role,
+        message: `${session.user.fullName} acepto la solicitud`
+      });
+    }
     return acceptedTrip;
   }
 );
@@ -1291,6 +1444,25 @@ app.post<{ Params: { tripId: string }; Body: DriverTripStatusUpdate }>(
       currentDriverLocation: buildDriverLocation(trip, nextStatus)
     });
     await persistTrips();
+    if (updatedTrip) {
+      const eventType =
+        nextStatus === "driver_en_route"
+          ? "driver_assigned"
+          : nextStatus === "driver_arrived"
+            ? "driver_arrived"
+            : nextStatus === "trip_started"
+              ? "trip_started"
+              : "trip_completed";
+
+      await createTripEvent({
+        tripId: updatedTrip.id,
+        type: eventType,
+        occurredAt: new Date().toISOString(),
+        actorId: session.user.id,
+        actorRole: session.user.role,
+        message: `Estado actualizado a ${nextStatus}`
+      });
+    }
     return updatedTrip;
   }
 );
@@ -1314,6 +1486,10 @@ const start = async () => {
     const persistedIncidents = await readIncidents();
     for (const incident of persistedIncidents) {
       incidentsById.set(incident.id, incident);
+    }
+    const persistedEvents = await readEvents();
+    for (const event of persistedEvents) {
+      tripEventsById.set(event.id, event);
     }
     const persistedUsers = await readUsers();
     for (const driver of persistedUsers.drivers) {
