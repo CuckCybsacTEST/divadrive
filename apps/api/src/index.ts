@@ -2,7 +2,10 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { z } from "zod";
 import {
+  type BusinessRulesSnapshot,
   type AdminDirectorySnapshot,
+  DEFAULT_PRICING_CONFIG,
+  DEFAULT_PROMOTIONS,
   type CancelTripPayload,
   type CreateIncidentPayload,
   DEFAULT_HOME_BOOTSTRAP,
@@ -12,6 +15,10 @@ import {
   type IncidentStatusUpdate,
   type OpsDashboardSnapshot,
   type PassengerProfile,
+  type PricingConfig,
+  type PricingConfigUpdate,
+  type Promotion,
+  type PromotionUpsertPayload,
   SERVICE_NAME,
   type ActiveTripStatus,
   type AuthSession,
@@ -23,6 +30,7 @@ import {
   TRIP_EVENT_TYPES,
   TRIP_STATUSES
 } from "@diva-drive/domain";
+import { readBusinessRules, writeBusinessRules } from "./business-store.js";
 import { readIncidents, writeIncidents } from "./incident-store.js";
 import { readTrips, writeTrips } from "./trip-store.js";
 import { readUsers, writeUsers } from "./user-store.js";
@@ -40,6 +48,8 @@ const tripsById = new Map<string, RideTrip>();
 const incidentsById = new Map<string, TripIncident>();
 const driverProfilesById = new Map<string, DriverProfile>();
 const passengerProfilesById = new Map<string, PassengerProfile>();
+let pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG;
+const promotionsById = new Map<string, Promotion>();
 
 const persistTrips = async () => {
   await writeTrips(Array.from(tripsById.values()));
@@ -53,6 +63,13 @@ const persistUsers = async () => {
   await writeUsers({
     drivers: Array.from(driverProfilesById.values()),
     passengers: Array.from(passengerProfilesById.values())
+  });
+};
+
+const persistBusinessRules = async () => {
+  await writeBusinessRules({
+    pricing: pricingConfig,
+    promotions: Array.from(promotionsById.values())
   });
 };
 
@@ -96,6 +113,24 @@ const incidentStatusSchema = z.object({
 const driverApprovalSchema = z.object({
   approvalStatus: z.enum(["pending", "approved", "rejected"])
 });
+const pricingConfigSchema = z.object({
+  currency: z.string().min(3),
+  baseFare: z.number().nonnegative(),
+  perKmRate: z.number().nonnegative(),
+  perMinuteRate: z.number().nonnegative(),
+  minimumFare: z.number().nonnegative(),
+  serviceFee: z.number().nonnegative(),
+  surgeMultiplier: z.number().min(1)
+});
+const promotionSchema = z.object({
+  name: z.string().min(2),
+  code: z.string().min(2),
+  kind: z.enum(["flat", "percentage"]),
+  value: z.number().positive(),
+  minFare: z.number().nonnegative(),
+  description: z.string().min(4),
+  isActive: z.boolean()
+});
 
 const requireSession = (authorizationHeader?: string) => {
   const token = authorizationHeader?.replace("Bearer ", "");
@@ -131,6 +166,42 @@ const requireAnyRole = (
 
 const toRadians = (value: number) => (value * Math.PI) / 180;
 
+const getBusinessSnapshot = (): BusinessRulesSnapshot => ({
+  pricing: pricingConfig,
+  promotions: Array.from(promotionsById.values()).sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt)
+  )
+});
+
+const buildAppliedPromotion = (fareBeforeDiscount: number) => {
+  const eligiblePromotions = Array.from(promotionsById.values()).filter(
+    (promotion) => promotion.isActive && fareBeforeDiscount >= promotion.minFare
+  );
+
+  if (eligiblePromotions.length === 0) {
+    return null;
+  }
+
+  const candidates = eligiblePromotions
+    .map((promotion) => {
+      const rawDiscount =
+        promotion.kind === "flat"
+          ? promotion.value
+          : (fareBeforeDiscount * promotion.value) / 100;
+      const discountAmount = Number(Math.min(rawDiscount, fareBeforeDiscount).toFixed(2));
+
+      return {
+        promotionId: promotion.id,
+        name: promotion.name,
+        code: promotion.code,
+        discountAmount
+      };
+    })
+    .sort((a, b) => b.discountAmount - a.discountAmount);
+
+  return candidates[0] ?? null;
+};
+
 const estimateRide = ({ origin, destination }: RideEstimateRequest): RideEstimate => {
   const earthRadiusKm = 6371;
   const deltaLatitude = toRadians(destination.latitude - origin.latitude);
@@ -149,13 +220,35 @@ const estimateRide = ({ origin, destination }: RideEstimateRequest): RideEstimat
     (earthRadiusKm * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine))).toFixed(1)
   );
   const durationMinutes = Math.max(8, Math.round(distanceKm * 3.2));
-  const estimatedFare = Number((5.5 + distanceKm * 1.8).toFixed(2));
+  const subtotal = Math.max(
+    pricingConfig.minimumFare,
+    Number(
+      (
+        (pricingConfig.baseFare +
+          distanceKm * pricingConfig.perKmRate +
+          durationMinutes * pricingConfig.perMinuteRate) *
+        pricingConfig.surgeMultiplier
+      ).toFixed(2)
+    )
+  );
+  const serviceFee = Number(pricingConfig.serviceFee.toFixed(2));
+  const fareBeforeDiscount = Number((subtotal + serviceFee).toFixed(2));
+  const appliedPromotion = buildAppliedPromotion(fareBeforeDiscount);
+  const discountAmount = Number((appliedPromotion?.discountAmount ?? 0).toFixed(2));
+  const estimatedFare = Number(Math.max(fareBeforeDiscount - discountAmount, 0).toFixed(2));
 
   return {
-    currency: "PEN",
+    currency: pricingConfig.currency,
     distanceKm,
     durationMinutes,
-    estimatedFare
+    estimatedFare,
+    fareBreakdown: {
+      subtotal,
+      serviceFee,
+      discountAmount,
+      total: estimatedFare
+    },
+    appliedPromotion
   };
 };
 
@@ -363,6 +456,22 @@ app.get("/ops/dashboard", async (request, reply) => {
   return getOpsSnapshot();
 });
 
+app.get("/ops/business", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  return getBusinessSnapshot();
+});
+
 app.get("/ops/directory", async (request, reply) => {
   const session = requireAnyRole(
     requireSession(request.headers.authorization),
@@ -513,6 +622,113 @@ app.post<{ Params: { driverId: string }; Body: DriverApprovalUpdate }>(
     driverProfilesById.set(updatedProfile.id, updatedProfile);
     await persistUsers();
     return updatedProfile;
+  }
+);
+
+app.post<{ Body: PricingConfigUpdate }>("/ops/pricing", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  const parsedPayload = pricingConfigSchema.safeParse(request.body);
+
+  if (!parsedPayload.success) {
+    reply.status(400);
+    return {
+      error: "invalid_pricing_payload"
+    };
+  }
+
+  pricingConfig = parsedPayload.data;
+  await persistBusinessRules();
+  return getBusinessSnapshot();
+});
+
+app.post<{ Body: PromotionUpsertPayload }>("/ops/promotions", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  const parsedPayload = promotionSchema.safeParse(request.body);
+
+  if (!parsedPayload.success) {
+    reply.status(400);
+    return {
+      error: "invalid_promotion_payload"
+    };
+  }
+
+  const promotion: Promotion = {
+    id: `promo-${Date.now()}`,
+    createdAt: new Date().toISOString(),
+    ...parsedPayload.data,
+    code: parsedPayload.data.code.trim().toUpperCase()
+  };
+
+  promotionsById.set(promotion.id, promotion);
+  await persistBusinessRules();
+  reply.status(201);
+  return promotion;
+});
+
+app.post<{ Params: { promotionId: string }; Body: PromotionUpsertPayload }>(
+  "/ops/promotions/:promotionId",
+  async (request, reply) => {
+    const session = requireAnyRole(
+      requireSession(request.headers.authorization),
+      ["operator", "admin"]
+    );
+
+    if (!session) {
+      reply.status(401);
+      return {
+        error: "invalid_session"
+      };
+    }
+
+    const parsedPayload = promotionSchema.safeParse(request.body);
+
+    if (!parsedPayload.success) {
+      reply.status(400);
+      return {
+        error: "invalid_promotion_payload"
+      };
+    }
+
+    const promotion = promotionsById.get(request.params.promotionId);
+
+    if (!promotion) {
+      reply.status(404);
+      return {
+        error: "promotion_not_found"
+      };
+    }
+
+    const updatedPromotion: Promotion = {
+      ...promotion,
+      ...parsedPayload.data,
+      code: parsedPayload.data.code.trim().toUpperCase()
+    };
+
+    promotionsById.set(updatedPromotion.id, updatedPromotion);
+    await persistBusinessRules();
+    return updatedPromotion;
   }
 );
 
@@ -914,6 +1130,14 @@ app.post<{ Params: { tripId: string }; Body: DriverTripStatusUpdate }>(
 
 const start = async () => {
   try {
+    const persistedBusinessRules = await readBusinessRules().catch(() => ({
+      pricing: DEFAULT_PRICING_CONFIG,
+      promotions: DEFAULT_PROMOTIONS
+    }));
+    pricingConfig = persistedBusinessRules.pricing;
+    for (const promotion of persistedBusinessRules.promotions) {
+      promotionsById.set(promotion.id, promotion);
+    }
     const persistedTrips = await readTrips();
     for (const trip of persistedTrips) {
       tripsById.set(trip.id, trip);

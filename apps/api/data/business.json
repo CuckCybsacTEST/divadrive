@@ -1,0 +1,35 @@
+{
+  "pricing": {
+    "currency": "PEN",
+    "baseFare": 5.5,
+    "perKmRate": 1.8,
+    "perMinuteRate": 0.22,
+    "minimumFare": 8.5,
+    "serviceFee": 1.2,
+    "surgeMultiplier": 1
+  },
+  "promotions": [
+    {
+      "id": "promo-welcome",
+      "name": "Bienvenida DIVA",
+      "code": "DIVA10",
+      "kind": "percentage",
+      "value": 10,
+      "minFare": 12,
+      "description": "Descuento inicial para activar primeras solicitudes.",
+      "isActive": true,
+      "createdAt": "2026-03-10T00:00:00.000Z"
+    },
+    {
+      "id": "promo-safe-night",
+      "name": "Trayecto seguro",
+      "code": "SAFE5",
+      "kind": "flat",
+      "value": 5,
+      "minFare": 20,
+      "description": "Incentivo fijo para recorridos de mayor valor.",
+      "isActive": false,
+      "createdAt": "2026-03-10T00:00:00.000Z"
+    }
+  ]
+}

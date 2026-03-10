@@ -43,6 +43,7 @@ export interface AuditEvent {
 export type IncidentSeverity = "low" | "medium" | "high";
 export type IncidentStatus = "open" | "reviewing" | "resolved";
 export type IncidentReporterRole = "passenger" | "driver" | "operator";
+export type PromotionKind = "flat" | "percentage";
 
 export interface TripIncident {
   id: string;
@@ -136,6 +137,44 @@ export interface RideEstimate {
   distanceKm: number;
   durationMinutes: number;
   estimatedFare: number;
+  fareBreakdown: FareBreakdown;
+  appliedPromotion: AppliedPromotion | null;
+}
+
+export interface FareBreakdown {
+  subtotal: number;
+  serviceFee: number;
+  discountAmount: number;
+  total: number;
+}
+
+export interface PricingConfig {
+  currency: string;
+  baseFare: number;
+  perKmRate: number;
+  perMinuteRate: number;
+  minimumFare: number;
+  serviceFee: number;
+  surgeMultiplier: number;
+}
+
+export interface Promotion {
+  id: string;
+  name: string;
+  code: string;
+  kind: PromotionKind;
+  value: number;
+  minFare: number;
+  description: string;
+  isActive: boolean;
+  createdAt: string;
+}
+
+export interface AppliedPromotion {
+  promotionId: string;
+  name: string;
+  code: string;
+  discountAmount: number;
 }
 
 export type ActiveTripStatus = Extract<
@@ -193,6 +232,11 @@ export interface OpsDashboardSnapshot {
   };
 }
 
+export interface BusinessRulesSnapshot {
+  pricing: PricingConfig;
+  promotions: Promotion[];
+}
+
 export interface AdminDirectorySnapshot {
   drivers: DriverProfile[];
   passengers: PassengerProfile[];
@@ -200,6 +244,26 @@ export interface AdminDirectorySnapshot {
 
 export interface DriverApprovalUpdate {
   approvalStatus: DriverApprovalStatus;
+}
+
+export interface PricingConfigUpdate {
+  currency: string;
+  baseFare: number;
+  perKmRate: number;
+  perMinuteRate: number;
+  minimumFare: number;
+  serviceFee: number;
+  surgeMultiplier: number;
+}
+
+export interface PromotionUpsertPayload {
+  name: string;
+  code: string;
+  kind: PromotionKind;
+  value: number;
+  minFare: number;
+  description: string;
+  isActive: boolean;
 }
 
 export interface IncidentStatusUpdate {
@@ -229,6 +293,41 @@ export const DRIVER_STATUS_FLOW: DriverTripStatusUpdate["status"][] = [
   "driver_arrived",
   "trip_started",
   "trip_completed"
+];
+
+export const DEFAULT_PRICING_CONFIG: PricingConfig = {
+  currency: "PEN",
+  baseFare: 5.5,
+  perKmRate: 1.8,
+  perMinuteRate: 0.22,
+  minimumFare: 8.5,
+  serviceFee: 1.2,
+  surgeMultiplier: 1
+};
+
+export const DEFAULT_PROMOTIONS: Promotion[] = [
+  {
+    id: "promo-welcome",
+    name: "Bienvenida DIVA",
+    code: "DIVA10",
+    kind: "percentage",
+    value: 10,
+    minFare: 12,
+    description: "Descuento inicial para activar primeras solicitudes.",
+    isActive: true,
+    createdAt: "2026-03-10T00:00:00.000Z"
+  },
+  {
+    id: "promo-safe-night",
+    name: "Trayecto seguro",
+    code: "SAFE5",
+    kind: "flat",
+    value: 5,
+    minFare: 20,
+    description: "Incentivo fijo para recorridos de mayor valor.",
+    isActive: false,
+    createdAt: "2026-03-10T00:00:00.000Z"
+  }
 ];
 
 export const SUGGESTED_DESTINATIONS: RidePoint[] = [

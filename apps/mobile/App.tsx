@@ -504,6 +504,22 @@ export default function App() {
                 <Text style={styles.muted}>
                   {estimate ? `${estimate.distanceKm} km - ${estimate.durationMinutes} min aprox.` : "Calcula antes de solicitar"}
                 </Text>
+                {estimate ? (
+                  <>
+                    <Text style={styles.muted}>
+                      Subtotal: {estimate.currency} {estimate.fareBreakdown.subtotal.toFixed(2)}
+                    </Text>
+                    <Text style={styles.muted}>
+                      Fee operativo: {estimate.currency} {estimate.fareBreakdown.serviceFee.toFixed(2)}
+                    </Text>
+                    <Text style={styles.muted}>
+                      Descuento: {estimate.currency} {estimate.fareBreakdown.discountAmount.toFixed(2)}
+                    </Text>
+                    <Text style={styles.muted}>
+                      Promo aplicada: {estimate.appliedPromotion?.code ?? "ninguna"}
+                    </Text>
+                  </>
+                ) : null}
                 <Pressable onPress={handleEstimate} style={styles.altButton}>
                   <Text style={styles.altButtonText}>Calcular estimacion</Text>
                 </Pressable>
@@ -519,6 +535,11 @@ export default function App() {
                     ? `Conductora: ${activeTrip.driverName}`
                     : "Esperando asignacion"}
                 </Text>
+                {activeTrip?.estimate.appliedPromotion ? (
+                  <Text style={styles.muted}>
+                    Promo: {activeTrip.estimate.appliedPromotion.code} (-{activeTrip.estimate.currency} {activeTrip.estimate.appliedPromotion.discountAmount.toFixed(2)})
+                  </Text>
+                ) : null}
                 {activeTrip ? (
                   <>
                     <Pressable onPress={handleReportIncident} style={styles.altButton}>

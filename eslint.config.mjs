@@ -9,7 +9,8 @@ export default tseslint.config(
       "**/build/**",
       "**/node_modules/**",
       "**/.expo/**",
-      "**/.vite/**"
+      "**/.vite/**",
+      "**/metro.config.js"
     ]
   },
   js.configs.recommended,
@@ -32,4 +33,3 @@ export default tseslint.config(
     }
   }
 );
-

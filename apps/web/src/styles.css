@@ -139,6 +139,11 @@ body {
   font: inherit;
 }
 
+select.authInput {
+  appearance: none;
+  background: #fff;
+}
+
 .primaryAction {
   width: 100%;
   padding: 14px 16px;
@@ -168,6 +173,47 @@ body {
   display: flex;
   gap: 10px;
   margin-top: 12px;
+  flex-wrap: wrap;
+}
+
+.formGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(120px, 1fr));
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+.formGrid label {
+  display: block;
+}
+
+.formGrid span {
+  display: block;
+  margin-bottom: 8px;
+  color: #655f59;
+  font-size: 13px;
+}
+
+.fullWidth {
+  grid-column: 1 / -1;
+}
+
+.toggleLabel {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid #e8d9cb;
+  background: #fff;
+}
+
+.toggleLabel span {
+  margin: 0;
+}
+
+.promoList {
+  margin-top: 14px;
 }
 
 .errorText {

@@ -1,11 +1,14 @@
 import { type ReactNode, useEffect, useState } from "react";
 import {
+  type BusinessRulesSnapshot,
   type AdminDirectorySnapshot,
   SERVICE_NAME,
   type AuthSession,
   type DriverApprovalStatus,
   type IncidentStatus,
   type OpsDashboardSnapshot,
+  type PricingConfig,
+  type PromotionUpsertPayload,
   type RideTrip
 } from "@diva-drive/domain";
 
@@ -25,6 +28,19 @@ const emptySnapshot: OpsDashboardSnapshot = {
     cancelled: 0,
     openIncidents: 0
   }
+};
+
+const emptyBusiness: BusinessRulesSnapshot = {
+  pricing: {
+    currency: "PEN",
+    baseFare: 0,
+    perKmRate: 0,
+    perMinuteRate: 0,
+    minimumFare: 0,
+    serviceFee: 0,
+    surgeMultiplier: 1
+  },
+  promotions: []
 };
 
 const formatMoney = (trip: RideTrip) =>
@@ -60,8 +76,19 @@ export default function App() {
     drivers: [],
     passengers: []
   });
+  const [business, setBusiness] = useState<BusinessRulesSnapshot>(emptyBusiness);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
+  const [pricingDraft, setPricingDraft] = useState<PricingConfig>(emptyBusiness.pricing);
+  const [promotionDraft, setPromotionDraft] = useState<PromotionUpsertPayload>({
+    name: "",
+    code: "",
+    kind: "percentage",
+    value: 10,
+    minFare: 12,
+    description: "",
+    isActive: true
+  });
 
   useEffect(() => {
     const savedSession = window.localStorage.getItem(STORAGE_KEY);
@@ -88,14 +115,17 @@ export default function App() {
 
     const loadDashboard = async () => {
       try {
-        const [nextSnapshot, nextDirectory] = await Promise.all([
+        const [nextSnapshot, nextDirectory, nextBusiness] = await Promise.all([
           authorizedFetch<OpsDashboardSnapshot>(session, "/ops/dashboard"),
-          authorizedFetch<AdminDirectorySnapshot>(session, "/ops/directory")
+          authorizedFetch<AdminDirectorySnapshot>(session, "/ops/directory"),
+          authorizedFetch<BusinessRulesSnapshot>(session, "/ops/business")
         ]);
 
         if (mounted) {
           setSnapshot(nextSnapshot);
           setDirectory(nextDirectory);
+          setBusiness(nextBusiness);
+          setPricingDraft(nextBusiness.pricing);
           setError(null);
         }
       } catch {
@@ -200,6 +230,99 @@ export default function App() {
       setDirectory(nextDirectory);
     } catch {
       setError("No pudimos actualizar la aprobacion de la conductora.");
+    }
+  };
+
+  const handlePricingChange = (field: keyof PricingConfig, value: string) => {
+    setPricingDraft((current) => ({
+      ...current,
+      [field]: field === "currency" ? value.toUpperCase() : Number(value)
+    }));
+  };
+
+  const handleSavePricing = async () => {
+    if (!session) {
+      return;
+    }
+
+    try {
+      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>(session, "/ops/pricing", {
+        method: "POST",
+        body: JSON.stringify(pricingDraft)
+      });
+      setBusiness(nextBusiness);
+      setPricingDraft(nextBusiness.pricing);
+      setError(null);
+    } catch {
+      setError("No pudimos guardar la configuracion tarifaria.");
+    }
+  };
+
+  const handleCreatePromotion = async () => {
+    if (!session) {
+      return;
+    }
+
+    try {
+      await authorizedFetch(session, "/ops/promotions", {
+        method: "POST",
+        body: JSON.stringify({
+          ...promotionDraft,
+          code: promotionDraft.code.toUpperCase()
+        })
+      });
+      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>(
+        session,
+        "/ops/business"
+      );
+      setBusiness(nextBusiness);
+      setPromotionDraft({
+        name: "",
+        code: "",
+        kind: "percentage",
+        value: 10,
+        minFare: 12,
+        description: "",
+        isActive: true
+      });
+    } catch {
+      setError("No pudimos crear la promocion.");
+    }
+  };
+
+  const handlePromotionToggle = async (
+    promotionId: string,
+    isActive: boolean
+  ) => {
+    if (!session) {
+      return;
+    }
+
+    const promotion = business.promotions.find((item) => item.id === promotionId);
+    if (!promotion) {
+      return;
+    }
+
+    try {
+      await authorizedFetch(session, `/ops/promotions/${promotionId}`, {
+        method: "POST",
+        body: JSON.stringify({
+          name: promotion.name,
+          code: promotion.code,
+          kind: promotion.kind,
+          value: promotion.value,
+          minFare: promotion.minFare,
+          description: promotion.description,
+          isActive
+        } satisfies PromotionUpsertPayload)
+      });
+      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>(
+        session,
+        "/ops/business"
+      );
+      setBusiness(nextBusiness);
+    } catch {
+      setError("No pudimos actualizar la promocion.");
     }
   };
 
@@ -386,6 +509,208 @@ export default function App() {
               </section>
             ))
           )}
+        </Panel>
+
+        <Panel title="Pricing" count={business.promotions.filter((item) => item.isActive).length}>
+          <section className="formGrid">
+            <label>
+              <span>Moneda</span>
+              <input
+                className="authInput"
+                value={pricingDraft.currency}
+                onChange={(event) => handlePricingChange("currency", event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Base</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.1"
+                value={pricingDraft.baseFare}
+                onChange={(event) => handlePricingChange("baseFare", event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Por km</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.1"
+                value={pricingDraft.perKmRate}
+                onChange={(event) => handlePricingChange("perKmRate", event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Por minuto</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.01"
+                value={pricingDraft.perMinuteRate}
+                onChange={(event) => handlePricingChange("perMinuteRate", event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Minimo</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.1"
+                value={pricingDraft.minimumFare}
+                onChange={(event) => handlePricingChange("minimumFare", event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Fee</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.1"
+                value={pricingDraft.serviceFee}
+                onChange={(event) => handlePricingChange("serviceFee", event.target.value)}
+              />
+            </label>
+            <label>
+              <span>Surge</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.1"
+                value={pricingDraft.surgeMultiplier}
+                onChange={(event) => handlePricingChange("surgeMultiplier", event.target.value)}
+              />
+            </label>
+          </section>
+          <button className="primaryAction" onClick={handleSavePricing}>
+            Guardar pricing
+          </button>
+        </Panel>
+
+        <Panel title="Promociones" count={business.promotions.length}>
+          <section className="formGrid">
+            <label>
+              <span>Nombre</span>
+              <input
+                className="authInput"
+                value={promotionDraft.name}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({ ...current, name: event.target.value }))
+                }
+              />
+            </label>
+            <label>
+              <span>Codigo</span>
+              <input
+                className="authInput"
+                value={promotionDraft.code}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({ ...current, code: event.target.value }))
+                }
+              />
+            </label>
+            <label>
+              <span>Tipo</span>
+              <select
+                className="authInput"
+                value={promotionDraft.kind}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({
+                    ...current,
+                    kind: event.target.value as PromotionUpsertPayload["kind"]
+                  }))
+                }
+              >
+                <option value="percentage">Porcentaje</option>
+                <option value="flat">Monto fijo</option>
+              </select>
+            </label>
+            <label>
+              <span>Valor</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.1"
+                value={promotionDraft.value}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({
+                    ...current,
+                    value: Number(event.target.value)
+                  }))
+                }
+              />
+            </label>
+            <label>
+              <span>Minimo</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.1"
+                value={promotionDraft.minFare}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({
+                    ...current,
+                    minFare: Number(event.target.value)
+                  }))
+                }
+              />
+            </label>
+            <label className="toggleLabel">
+              <span>Activa</span>
+              <input
+                type="checkbox"
+                checked={promotionDraft.isActive}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({
+                    ...current,
+                    isActive: event.target.checked
+                  }))
+                }
+              />
+            </label>
+            <label className="fullWidth">
+              <span>Descripcion</span>
+              <input
+                className="authInput"
+                value={promotionDraft.description}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({
+                    ...current,
+                    description: event.target.value
+                  }))
+                }
+              />
+            </label>
+          </section>
+          <button className="primaryAction" onClick={handleCreatePromotion}>
+            Crear promocion
+          </button>
+          <div className="promoList">
+            {business.promotions.map((promotion) => (
+              <section key={promotion.id} className="tripCard queue">
+                <div className="tripRow">
+                  <strong>{promotion.name}</strong>
+                  <span className="badge">{promotion.code}</span>
+                </div>
+                <p className="meta">
+                  {promotion.kind === "percentage"
+                    ? `${promotion.value}%`
+                    : `${business.pricing.currency} ${promotion.value.toFixed(2)}`}
+                  {" · "}minimo {business.pricing.currency} {promotion.minFare.toFixed(2)}
+                </p>
+                <p className="route">{promotion.description}</p>
+                <div className="incidentActions">
+                  <button
+                    className="secondaryAction"
+                    onClick={() => handlePromotionToggle(promotion.id, !promotion.isActive)}
+                  >
+                    {promotion.isActive ? "Desactivar" : "Activar"}
+                  </button>
+                  <span className="badge">{promotion.isActive ? "active" : "paused"}</span>
+                </div>
+              </section>
+            ))}
+          </div>
         </Panel>
       </section>
     </main>
