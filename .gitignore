@@ -10,4 +10,5 @@ coverage/
 .env
 .env.*
 !.env.example
-
+apps/api/data/sessions.json
+apps/mobile/package-lock.json

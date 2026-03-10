@@ -70,6 +70,18 @@ create table if not exists trip_events (
 create index if not exists trip_events_trip_id_idx on trip_events (trip_id);
 create index if not exists trip_events_occurred_at_idx on trip_events (occurred_at desc);
 
+create table if not exists api_sessions (
+  access_token text primary key,
+  user_id text not null,
+  role text not null,
+  full_name text not null,
+  phone text not null,
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+create index if not exists api_sessions_user_id_idx on api_sessions (user_id);
+create index if not exists api_sessions_role_idx on api_sessions (role);
+
 create table if not exists business_config (
   id uuid primary key default gen_random_uuid(),
   pricing jsonb not null,
@@ -104,6 +116,7 @@ alter table driver_profiles enable row level security;
 alter table trips enable row level security;
 alter table trip_incidents enable row level security;
 alter table trip_events enable row level security;
+alter table api_sessions enable row level security;
 alter table business_config enable row level security;
 alter table promotions enable row level security;
 alter table business_audit_log enable row level security;

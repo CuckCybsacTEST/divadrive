@@ -39,7 +39,8 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - pricing configurable, promociones administrables y auditoria comercial
 - historial de viajes, metricas comerciales, eventos operativos y notificaciones
 - buscador de destinos, ruta simulada en mapa y ETA mas creible
-- base de integracion a Supabase lista para activarse desde el API
+- persistencia Supabase-first para usuarios, viajes, incidencias, eventos y reglas comerciales
+- sesiones persistidas y lecturas live de viajes/eventos/incidencias desde el API
 
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
@@ -65,4 +66,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Conectar el primer repositorio real de persistencia sobre Supabase y migrar `users`, `trips`, `incidents` y `events`.
+Cerrar `auth` menos demo con Supabase Auth y empezar a reemplazar el write-path restante del API por repositorios live.

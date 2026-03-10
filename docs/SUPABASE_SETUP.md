@@ -22,6 +22,7 @@ Este proyecto ya tiene preparada la base para empezar a usar Supabase desde el A
 ## Paso 3. Crear el esquema
 - Abre el SQL Editor de Supabase
 - Ejecuta el contenido de [D:\DIVADRIVE\docs\sql\supabase_init.sql](D:/DIVADRIVE/docs/sql/supabase_init.sql)
+- Si ya lo ejecutaste antes, vuelve a correrlo: ahora incluye `api_sessions` para persistir sesiones del API
 
 ## Paso 4. Verificar el cliente del API
 - El API ya carga entorno desde [D:\DIVADRIVE\apps\api\src\env.ts](D:/DIVADRIVE/apps/api/src/env.ts)
@@ -29,10 +30,10 @@ Este proyecto ya tiene preparada la base para empezar a usar Supabase desde el A
 - Mientras `SUPABASE_ENABLED=false`, el sistema sigue usando persistencia local y no rompe desarrollo
 
 ## Paso 5. Siguiente migracion recomendada
-1. Migrar `users`, `trips`, `incidents` y `events`
-2. Migrar `business rules`
-3. Reemplazar sesiones demo por `Supabase Auth`
-4. Activar `Realtime` para timeline y panel
+1. Consolidar `auth` menos demo sobre Supabase Auth
+2. Mover mas writes del API a repositorios live sobre Supabase
+3. Activar `Realtime` para timeline y panel
+4. Subir documentos de conductoras a Supabase Storage
 
 ## Nota de seguridad
 - `service_role key` solo debe usarse en el API

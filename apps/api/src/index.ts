@@ -1,5 +1,6 @@
 import cors from "@fastify/cors";
 import Fastify from "fastify";
+import { randomUUID } from "node:crypto";
 import { z } from "zod";
 import {
   type BusinessRulesSnapshot,
@@ -42,6 +43,7 @@ import { readBusinessRules, writeBusinessRules } from "./business-store.js";
 import { appEnv } from "./env.js";
 import { readEvents, writeEvents } from "./event-store.js";
 import { readIncidents, writeIncidents } from "./incident-store.js";
+import { readSession, writeSession } from "./session-store.js";
 import { syncLocalDataToSupabase } from "./supabase-bootstrap.js";
 import { readTrips, writeTrips } from "./trip-store.js";
 import { readUsers, writeUsers } from "./user-store.js";
@@ -54,7 +56,6 @@ await app.register(cors, {
   origin: true
 });
 
-const sessions = new Map<string, AuthSession>();
 const tripsById = new Map<string, RideTrip>();
 const incidentsById = new Map<string, TripIncident>();
 const tripEventsById = new Map<string, TripTimelineEvent>();
@@ -156,14 +157,14 @@ const promotionSchema = z.object({
   isActive: z.boolean()
 });
 
-const requireSession = (authorizationHeader?: string) => {
+const requireSession = async (authorizationHeader?: string) => {
   const token = authorizationHeader?.replace("Bearer ", "");
 
-  if (!token || !sessions.has(token)) {
+  if (!token) {
     return null;
   }
 
-  return sessions.get(token) ?? null;
+  return readSession(token);
 };
 
 const requireRole = (
@@ -186,6 +187,21 @@ const requireAnyRole = (
   }
 
   return session;
+};
+
+const hydrateTrip = (trip: RideTrip) => {
+  tripsById.set(trip.id, trip);
+  return trip;
+};
+
+const hydrateIncident = (incident: TripIncident) => {
+  incidentsById.set(incident.id, incident);
+  return incident;
+};
+
+const hydrateEvent = (event: TripTimelineEvent) => {
+  tripEventsById.set(event.id, event);
+  return event;
 };
 
 const toRadians = (value: number) => (value * Math.PI) / 180;
@@ -241,16 +257,20 @@ const appendBusinessAudit = (
   });
 };
 
-const isPassengerNew = (passengerId: string) =>
-  !Array.from(tripsById.values()).some((trip) => trip.passengerId === passengerId);
+const isPassengerNew = async (passengerId: string) => {
+  const trips = await readTrips();
+  return !trips.some((trip) => trip.passengerId === passengerId);
+};
 
-const buildAppliedPromotion = (
+const buildAppliedPromotion = async (
   fareBeforeDiscount: number,
   passengerId: string,
   requestedPromoCode?: string
 ) => {
   const normalizedCode = requestedPromoCode?.trim().toUpperCase();
-  const audience = isPassengerNew(passengerId) ? "new_passenger" : "returning_passenger";
+  const audience = (await isPassengerNew(passengerId))
+    ? "new_passenger"
+    : "returning_passenger";
   const eligiblePromotions = Array.from(promotionsById.values()).filter((promotion) => {
     if (!promotion.isActive || fareBeforeDiscount < promotion.minFare) {
       return false;
@@ -291,10 +311,10 @@ const buildAppliedPromotion = (
   return candidates[0] ?? null;
 };
 
-const estimateRide = (
+const estimateRide = async (
   { origin, destination, promoCode }: RideEstimateRequest,
   passengerId: string
-): RideEstimate => {
+): Promise<RideEstimate> => {
   const earthRadiusKm = 6371;
   const deltaLatitude = toRadians(destination.latitude - origin.latitude);
   const deltaLongitude = toRadians(destination.longitude - origin.longitude);
@@ -327,7 +347,11 @@ const estimateRide = (
   );
   const serviceFee = Number(pricingConfig.serviceFee.toFixed(2));
   const fareBeforeDiscount = Number((subtotal + serviceFee).toFixed(2));
-  const appliedPromotion = buildAppliedPromotion(fareBeforeDiscount, passengerId, promoCode);
+  const appliedPromotion = await buildAppliedPromotion(
+    fareBeforeDiscount,
+    passengerId,
+    promoCode
+  );
   const discountAmount = Number((appliedPromotion?.discountAmount ?? 0).toFixed(2));
   const estimatedFare = Number(Math.max(fareBeforeDiscount - discountAmount, 0).toFixed(2));
   const routePoints = Array.from({ length: 6 }, (_, index) => {
@@ -407,10 +431,10 @@ const buildDriverEta = (status: ActiveTripStatus) => {
   }
 };
 
-const createSession = (payload: z.infer<typeof signInSchema>): AuthSession => {
+const createSession = async (payload: z.infer<typeof signInSchema>): Promise<AuthSession> => {
   const idSuffix = payload.phone.replace(/\D/g, "").slice(-4) || "0000";
   const session: AuthSession = {
-    accessToken: `demo-${payload.role}-${idSuffix}`,
+    accessToken: `session-${randomUUID()}`,
     user: {
       id: `${payload.role}-${idSuffix}`,
       role: payload.role,
@@ -426,13 +450,21 @@ const createSession = (payload: z.infer<typeof signInSchema>): AuthSession => {
     }
   };
 
-  sessions.set(session.accessToken, session);
+  await writeSession(session);
   return session;
 };
 
 const ensureProfileForSession = async (session: AuthSession) => {
-  if (session.user.role === "driver" && !driverProfilesById.has(session.user.id)) {
-    driverProfilesById.set(session.user.id, {
+  const persistedUsers = await readUsers();
+  const persistedDriversById = new Map(
+    persistedUsers.drivers.map((driver) => [driver.id, driver])
+  );
+  const persistedPassengersById = new Map(
+    persistedUsers.passengers.map((passenger) => [passenger.id, passenger])
+  );
+
+  if (session.user.role === "driver" && !persistedDriversById.has(session.user.id)) {
+    const profile: DriverProfile = {
       id: session.user.id,
       fullName: session.user.fullName,
       phone: session.user.phone,
@@ -442,46 +474,81 @@ const ensureProfileForSession = async (session: AuthSession) => {
       licenseNumber: `LIC-${session.user.id.slice(-4)}`,
       vehicleDescription: "Sedan blanco - onboarding inicial",
       createdAt: new Date().toISOString()
-    });
-    await persistUsers();
+    };
+    driverProfilesById.set(profile.id, profile);
+    persistedUsers.drivers.push(profile);
+    await writeUsers(persistedUsers);
   }
 
-  if (session.user.role === "passenger" && !passengerProfilesById.has(session.user.id)) {
-    passengerProfilesById.set(session.user.id, {
+  if (session.user.role === "passenger" && !persistedPassengersById.has(session.user.id)) {
+    const profile: PassengerProfile = {
       id: session.user.id,
       fullName: session.user.fullName,
       phone: session.user.phone,
       city: DEFAULT_HOME_BOOTSTRAP.city,
       createdAt: new Date().toISOString()
-    });
-    await persistUsers();
+    };
+    passengerProfilesById.set(profile.id, profile);
+    persistedUsers.passengers.push(profile);
+    await writeUsers(persistedUsers);
   }
 };
 
-const getPassengerActiveTrip = (passengerId: string) => {
-  const trips = Array.from(tripsById.values()).filter(
+const getPassengerActiveTrip = async (passengerId: string) => {
+  const trips = (await readTrips()).filter(
     (trip) =>
       trip.passengerId === passengerId &&
       trip.status !== "trip_completed" &&
       trip.status !== "cancelled"
   );
 
-  return trips.at(-1) ?? null;
+  return trips.at(-1) ? hydrateTrip(trips.at(-1) as RideTrip) : null;
 };
 
-const getDriverActiveTrip = (driverId: string) => {
-  return (
-    Array.from(tripsById.values()).find(
+const getDriverActiveTrip = async (driverId: string) => {
+  const trip =
+    (await readTrips()).find(
       (trip) =>
         trip.driverId === driverId &&
         trip.status !== "trip_completed" &&
         trip.status !== "cancelled"
-    ) ?? null
-  );
+    ) ?? null;
+
+  return trip ? hydrateTrip(trip) : null;
 };
 
-const getDriverQueue = () => {
-  return Array.from(tripsById.values()).filter((trip) => trip.status === "requested");
+const getDriverQueue = async () => {
+  return (await readTrips())
+    .filter((trip) => trip.status === "requested")
+    .map(hydrateTrip);
+};
+
+const getTripById = async (tripId: string) => {
+  const cachedTrip = tripsById.get(tripId);
+
+  if (cachedTrip) {
+    return cachedTrip;
+  }
+
+  const trip = (await readTrips()).find((entry) => entry.id === tripId) ?? null;
+  return trip ? hydrateTrip(trip) : null;
+};
+
+const getDriverProfileById = async (driverId: string) => {
+  const cachedProfile = driverProfilesById.get(driverId);
+
+  if (cachedProfile) {
+    return cachedProfile;
+  }
+
+  const users = await readUsers();
+  const profile = users.drivers.find((entry) => entry.id === driverId) ?? null;
+
+  if (profile) {
+    driverProfilesById.set(profile.id, profile);
+  }
+
+  return profile;
 };
 
 const patchTrip = (tripId: string, patch: Partial<RideTrip>) => {
@@ -506,31 +573,35 @@ const createTripEvent = async (event: Omit<TripTimelineEvent, "id">) => {
     ...event
   };
 
-  tripEventsById.set(nextEvent.id, nextEvent);
+  hydrateEvent(nextEvent);
   await persistEvents();
   return nextEvent;
 };
 
-const getTripTimeline = (tripId: string): TripTimelineSnapshot => ({
-  events: Array.from(tripEventsById.values())
+const getTripTimeline = async (tripId: string): Promise<TripTimelineSnapshot> => ({
+  events: (await readEvents())
     .filter((event) => event.tripId === tripId)
     .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+    .map(hydrateEvent)
 });
 
-const getOpsEventStream = () =>
-  Array.from(tripEventsById.values())
+const getOpsEventStream = async () =>
+  (await readEvents())
     .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
-    .slice(0, 30);
+    .slice(0, 30)
+    .map(hydrateEvent);
 
-const getRecentOperationalNotifications = (
+const getRecentOperationalNotifications = async (
   session: AuthSession,
   activeTrip: RideTrip | null
-): OperationalNotification[] => {
+): Promise<OperationalNotification[]> => {
   if (!activeTrip) {
     return [];
   }
 
-  return getTripTimeline(activeTrip.id).events.slice(0, 3).map((event) => ({
+  const timeline = await getTripTimeline(activeTrip.id);
+
+  return timeline.events.slice(0, 3).map((event) => ({
     id: event.id,
     level:
       event.type === "incident_created"
@@ -546,10 +617,10 @@ const getRecentOperationalNotifications = (
   }));
 };
 
-const getOpsSnapshot = (): OpsDashboardSnapshot => {
-  const allTrips = Array.from(tripsById.values()).sort((a, b) =>
-    b.requestedAt.localeCompare(a.requestedAt)
-  );
+const getOpsSnapshot = async (): Promise<OpsDashboardSnapshot> => {
+  const allTrips = (await readTrips())
+    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
+    .map(hydrateTrip);
   const queueTrips = allTrips.filter((trip) => trip.status === "requested");
   const completedTrips = allTrips.filter((trip) => trip.status === "trip_completed");
   const cancelledTrips = allTrips.filter((trip) => trip.status === "cancelled");
@@ -559,9 +630,9 @@ const getOpsSnapshot = (): OpsDashboardSnapshot => {
       trip.status !== "trip_completed" &&
       trip.status !== "cancelled"
   );
-  const incidents = Array.from(incidentsById.values()).sort((a, b) =>
-    b.createdAt.localeCompare(a.createdAt)
-  );
+  const incidents = (await readIncidents())
+    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+    .map(hydrateIncident);
 
   return {
     queueTrips,
@@ -579,8 +650,8 @@ const getOpsSnapshot = (): OpsDashboardSnapshot => {
   };
 };
 
-const getCommercialMetrics = (): CommercialMetricsSnapshot => {
-  const allTrips = Array.from(tripsById.values());
+const getCommercialMetrics = async (): Promise<CommercialMetricsSnapshot> => {
+  const allTrips = (await readTrips()).map(hydrateTrip);
   const completedTrips = allTrips.filter((trip) => trip.status === "trip_completed");
   const cancelledTrips = allTrips.filter((trip) => trip.status === "cancelled");
   const totalRevenue = Number(
@@ -632,14 +703,15 @@ const getCommercialMetrics = (): CommercialMetricsSnapshot => {
   };
 };
 
-const getTripHistoryForSession = (session: AuthSession): TripHistorySnapshot => {
-  const trips = Array.from(tripsById.values())
+const getTripHistoryForSession = async (session: AuthSession): Promise<TripHistorySnapshot> => {
+  const trips = (await readTrips())
     .filter((trip) =>
       session.user.role === "driver"
         ? trip.driverId === session.user.id
         : trip.passengerId === session.user.id
     )
-    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
+    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
+    .map(hydrateTrip);
 
   return {
     trips
@@ -664,7 +736,7 @@ app.get("/meta/trips", async () => {
 
 app.get("/places/search", async (request, reply) => {
   const session = requireRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     "passenger"
   );
 
@@ -703,7 +775,7 @@ app.get("/places/search", async (request, reply) => {
 
 app.get("/ops/dashboard", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -719,7 +791,7 @@ app.get("/ops/dashboard", async (request, reply) => {
 
 app.get("/ops/business", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -735,7 +807,7 @@ app.get("/ops/business", async (request, reply) => {
 
 app.get("/ops/commercial-metrics", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -751,7 +823,7 @@ app.get("/ops/commercial-metrics", async (request, reply) => {
 
 app.get("/ops/events", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -763,13 +835,13 @@ app.get("/ops/events", async (request, reply) => {
   }
 
   return {
-    events: getOpsEventStream()
+    events: await getOpsEventStream()
   };
 });
 
 app.get("/ops/directory", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -794,7 +866,7 @@ app.get("/ops/directory", async (request, reply) => {
 
 app.get("/ops/trips", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -806,15 +878,15 @@ app.get("/ops/trips", async (request, reply) => {
   }
 
   return {
-    trips: Array.from(tripsById.values()).sort((a, b) =>
-      b.requestedAt.localeCompare(a.requestedAt)
-    )
+    trips: (await readTrips())
+      .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
+      .map(hydrateTrip)
   };
 });
 
 app.get("/ops/incidents", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -826,9 +898,9 @@ app.get("/ops/incidents", async (request, reply) => {
   }
 
   return {
-    incidents: Array.from(incidentsById.values()).sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt)
-    )
+    incidents: (await readIncidents())
+      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+      .map(hydrateIncident)
   };
 });
 
@@ -836,7 +908,7 @@ app.post<{ Params: { incidentId: string }; Body: IncidentStatusUpdate }>(
   "/ops/incidents/:incidentId/status",
   async (request, reply) => {
     const session = requireAnyRole(
-      requireSession(request.headers.authorization),
+      await requireSession(request.headers.authorization),
       ["operator", "admin"]
     );
 
@@ -880,7 +952,7 @@ app.post<{ Params: { driverId: string }; Body: DriverApprovalUpdate }>(
   "/ops/drivers/:driverId/approval",
   async (request, reply) => {
     const session = requireAnyRole(
-      requireSession(request.headers.authorization),
+      await requireSession(request.headers.authorization),
       ["operator", "admin"]
     );
 
@@ -922,7 +994,7 @@ app.post<{ Params: { driverId: string }; Body: DriverApprovalUpdate }>(
 
 app.post<{ Body: PricingConfigUpdate }>("/ops/pricing", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -954,7 +1026,7 @@ app.post<{ Body: PricingConfigUpdate }>("/ops/pricing", async (request, reply) =
 
 app.post<{ Body: PromotionUpsertPayload }>("/ops/promotions", async (request, reply) => {
   const session = requireAnyRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     ["operator", "admin"]
   );
 
@@ -996,7 +1068,7 @@ app.post<{ Params: { promotionId: string }; Body: PromotionUpsertPayload }>(
   "/ops/promotions/:promotionId",
   async (request, reply) => {
     const session = requireAnyRole(
-      requireSession(request.headers.authorization),
+      await requireSession(request.headers.authorization),
       ["operator", "admin"]
     );
 
@@ -1052,13 +1124,13 @@ app.post("/auth/sign-in", async (request, reply) => {
     };
   }
 
-  const session = createSession(parsedPayload.data);
+  const session = await createSession(parsedPayload.data);
   await ensureProfileForSession(session);
   return session;
 });
 
 app.get("/auth/session", async (request, reply) => {
-  const session = requireSession(request.headers.authorization);
+  const session = await requireSession(request.headers.authorization);
 
   if (!session) {
     reply.status(401);
@@ -1072,7 +1144,7 @@ app.get("/auth/session", async (request, reply) => {
 
 app.get("/home/passenger", async (request, reply) => {
   const session = requireRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     "passenger"
   );
 
@@ -1083,19 +1155,18 @@ app.get("/home/passenger", async (request, reply) => {
     };
   }
 
+  const activeTrip = await getPassengerActiveTrip(session.user.id);
+
   return {
     ...DEFAULT_HOME_BOOTSTRAP,
-    activeTripStatus: getPassengerActiveTrip(session.user.id)?.status ?? null,
-    notifications: getRecentOperationalNotifications(
-      session,
-      getPassengerActiveTrip(session.user.id)
-    )
+    activeTripStatus: activeTrip?.status ?? null,
+    notifications: await getRecentOperationalNotifications(session, activeTrip)
   };
 });
 
 app.get("/home/driver", async (request, reply) => {
   const session = requireRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     "driver"
   );
 
@@ -1106,21 +1177,20 @@ app.get("/home/driver", async (request, reply) => {
     };
   }
 
+  const activeTrip = await getDriverActiveTrip(session.user.id);
+
   return {
     city: DEFAULT_HOME_BOOTSTRAP.city,
-    queueSize: getDriverQueue().length,
-    activeTrip: getDriverActiveTrip(session.user.id),
-    driverProfile: driverProfilesById.get(session.user.id) ?? null,
-    notifications: getRecentOperationalNotifications(
-      session,
-      getDriverActiveTrip(session.user.id)
-    )
+    queueSize: (await getDriverQueue()).length,
+    activeTrip,
+    driverProfile: await getDriverProfileById(session.user.id),
+    notifications: await getRecentOperationalNotifications(session, activeTrip)
   };
 });
 
 app.post("/trips/estimate", async (request, reply) => {
   const session = requireRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     "passenger"
   );
 
@@ -1145,7 +1215,7 @@ app.post("/trips/estimate", async (request, reply) => {
 
 app.post("/trips", async (request, reply) => {
   const session = requireRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     "passenger"
   );
 
@@ -1172,7 +1242,7 @@ app.post("/trips", async (request, reply) => {
     };
   }
 
-  const estimate = estimateRide(parsedPayload.data, session.user.id);
+  const estimate = await estimateRide(parsedPayload.data, session.user.id);
   const trip: RideTrip = {
     id: `trip-${Date.now()}`,
     passengerId: parsedPayload.data.passengerId,
@@ -1200,7 +1270,7 @@ app.post("/trips", async (request, reply) => {
 });
 
 app.get("/trips/active", async (request, reply) => {
-  const session = requireSession(request.headers.authorization);
+  const session = await requireSession(request.headers.authorization);
 
   if (!session) {
     reply.status(401);
@@ -1212,13 +1282,13 @@ app.get("/trips/active", async (request, reply) => {
   return {
     trip:
       session.user.role === "driver"
-        ? getDriverActiveTrip(session.user.id)
-        : getPassengerActiveTrip(session.user.id)
+        ? await getDriverActiveTrip(session.user.id)
+        : await getPassengerActiveTrip(session.user.id)
   };
 });
 
 app.get("/trips/history", async (request, reply) => {
-  const session = requireSession(request.headers.authorization);
+  const session = await requireSession(request.headers.authorization);
 
   if (!session) {
     reply.status(401);
@@ -1238,7 +1308,7 @@ app.get("/trips/history", async (request, reply) => {
 });
 
 app.get<{ Params: { tripId: string } }>("/trips/:tripId/events", async (request, reply) => {
-  const session = requireSession(request.headers.authorization);
+  const session = await requireSession(request.headers.authorization);
 
   if (!session) {
     reply.status(401);
@@ -1247,7 +1317,7 @@ app.get<{ Params: { tripId: string } }>("/trips/:tripId/events", async (request,
     };
   }
 
-  const trip = tripsById.get(request.params.tripId);
+  const trip = await getTripById(request.params.tripId);
 
   if (!trip) {
     reply.status(404);
@@ -1274,7 +1344,7 @@ app.get<{ Params: { tripId: string } }>("/trips/:tripId/events", async (request,
 });
 
 app.post<{ Body: CreateIncidentPayload }>("/incidents", async (request, reply) => {
-  const session = requireSession(request.headers.authorization);
+  const session = await requireSession(request.headers.authorization);
 
   if (!session) {
     reply.status(401);
@@ -1292,7 +1362,7 @@ app.post<{ Body: CreateIncidentPayload }>("/incidents", async (request, reply) =
     };
   }
 
-  const trip = tripsById.get(parsedPayload.data.tripId);
+  const trip = await getTripById(parsedPayload.data.tripId);
 
   if (!trip) {
     reply.status(404);
@@ -1331,7 +1401,7 @@ app.post<{ Body: CreateIncidentPayload }>("/incidents", async (request, reply) =
 app.post<{ Params: { tripId: string }; Body: CancelTripPayload }>(
   "/trips/:tripId/cancel",
   async (request, reply) => {
-    const session = requireSession(request.headers.authorization);
+    const session = await requireSession(request.headers.authorization);
 
     if (!session) {
       reply.status(401);
@@ -1349,7 +1419,7 @@ app.post<{ Params: { tripId: string }; Body: CancelTripPayload }>(
       };
     }
 
-    const trip = tripsById.get(request.params.tripId);
+    const trip = await getTripById(request.params.tripId);
 
     if (!trip) {
       reply.status(404);
@@ -1397,7 +1467,7 @@ app.post<{ Params: { tripId: string }; Body: CancelTripPayload }>(
 
 app.get("/driver/trips/queue", async (request, reply) => {
   const session = requireRole(
-    requireSession(request.headers.authorization),
+    await requireSession(request.headers.authorization),
     "driver"
   );
 
@@ -1409,7 +1479,7 @@ app.get("/driver/trips/queue", async (request, reply) => {
   }
 
   return {
-    trips: getDriverQueue()
+    trips: await getDriverQueue()
   };
 });
 
@@ -1417,7 +1487,7 @@ app.post<{ Params: { tripId: string } }>(
   "/driver/trips/:tripId/accept",
   async (request, reply) => {
     const session = requireRole(
-      requireSession(request.headers.authorization),
+      await requireSession(request.headers.authorization),
       "driver"
     );
 
@@ -1428,14 +1498,14 @@ app.post<{ Params: { tripId: string } }>(
       };
     }
 
-    if (getDriverActiveTrip(session.user.id)) {
+    if (await getDriverActiveTrip(session.user.id)) {
       reply.status(409);
       return {
         error: "driver_already_has_active_trip"
       };
     }
 
-    const driverProfile = driverProfilesById.get(session.user.id);
+    const driverProfile = await getDriverProfileById(session.user.id);
 
     if (!driverProfile || driverProfile.approvalStatus !== "approved") {
       reply.status(403);
@@ -1444,7 +1514,7 @@ app.post<{ Params: { tripId: string } }>(
       };
     }
 
-    const trip = tripsById.get(request.params.tripId);
+    const trip = await getTripById(request.params.tripId);
 
     if (!trip || trip.status !== "requested") {
       reply.status(404);
@@ -1479,7 +1549,7 @@ app.post<{ Params: { tripId: string }; Body: DriverTripStatusUpdate }>(
   "/driver/trips/:tripId/status",
   async (request, reply) => {
     const session = requireRole(
-      requireSession(request.headers.authorization),
+      await requireSession(request.headers.authorization),
       "driver"
     );
 
@@ -1490,7 +1560,7 @@ app.post<{ Params: { tripId: string }; Body: DriverTripStatusUpdate }>(
       };
     }
 
-    const trip = tripsById.get(request.params.tripId);
+    const trip = await getTripById(request.params.tripId);
 
     if (!trip || trip.driverId !== session.user.id) {
       reply.status(404);
