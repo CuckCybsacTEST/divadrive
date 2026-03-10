@@ -100,14 +100,26 @@ export interface RideEstimate {
   estimatedFare: number;
 }
 
-export interface RequestedTrip {
+export type ActiveTripStatus = Extract<
+  TripStatus,
+  | "requested"
+  | "matched"
+  | "driver_en_route"
+  | "driver_arrived"
+  | "trip_started"
+  | "trip_completed"
+>;
+
+export interface RideTrip {
   id: string;
   passengerId: string;
+  passengerName: string;
   origin: RidePoint;
   destination: RidePoint;
   estimate: RideEstimate;
-  status: Extract<TripStatus, "requested" | "matched" | "driver_en_route">;
+  status: ActiveTripStatus;
   requestedAt: string;
+  driverId?: string;
   driverName?: string;
   driverEtaMinutes?: number;
   currentDriverLocation?: Coordinates;
@@ -115,7 +127,27 @@ export interface RequestedTrip {
 
 export interface CreateTripRequest extends RideEstimateRequest {
   passengerId: string;
+  passengerName: string;
 }
+
+export interface DriverQueueSummary {
+  queueSize: number;
+  activeTrip: RideTrip | null;
+}
+
+export interface DriverTripStatusUpdate {
+  status: Extract<
+    ActiveTripStatus,
+    "driver_en_route" | "driver_arrived" | "trip_started" | "trip_completed"
+  >;
+}
+
+export const DRIVER_STATUS_FLOW: DriverTripStatusUpdate["status"][] = [
+  "driver_en_route",
+  "driver_arrived",
+  "trip_started",
+  "trip_completed"
+];
 
 export const SUGGESTED_DESTINATIONS: RidePoint[] = [
   {

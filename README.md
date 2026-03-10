@@ -27,6 +27,7 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - contratos compartidos de sesion y home en `packages/domain`
 - seleccion de destino sugerido, estimacion y solicitud inicial de viaje
 - matching base temporal y tracking inicial del viaje en `requested`, `matched` y `driver_en_route`
+- login por rol en mobile, cola de solicitudes para conductora y control manual de estados
 
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
@@ -50,4 +51,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Implementar el siguiente slice vertical del producto: app de conductora, aceptacion real de solicitud y control manual de transiciones de viaje.
+Implementar el siguiente slice vertical del producto: persistencia real, panel web operativo y reglas de cancelacion/incidencias.

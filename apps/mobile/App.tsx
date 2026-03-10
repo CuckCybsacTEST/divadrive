@@ -15,316 +15,210 @@ import MapView, { Marker } from "react-native-maps";
 import * as Location from "expo-location";
 import {
   DEFAULT_HOME_BOOTSTRAP,
+  DRIVER_STATUS_FLOW,
   SERVICE_NAME,
-  type CreateTripRequest,
   type AuthSession,
+  type DriverQueueSummary,
+  type DriverTripStatusUpdate,
   type HomeBootstrap,
   type MapRegion,
-  type RequestedTrip,
   type RideEstimate,
   type RideEstimateRequest,
   type RidePoint,
+  type RideTrip,
   type SignInPayload
 } from "@diva-drive/domain";
 
 const API_BASE_URL = "http://10.0.2.2:4000";
+type AuthRole = SignInPayload["role"];
 
-const demoSessionFromPhone = (phone: string): AuthSession => ({
-  accessToken: `demo-passenger-${phone.slice(-4) || "0000"}`,
+const api = async <T,>(
+  path: string,
+  session?: AuthSession,
+  options?: RequestInit
+): Promise<T> => {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      ...(session
+        ? {
+            Authorization: `Bearer ${session.accessToken}`
+          }
+        : {}),
+      ...(options?.headers ?? {})
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(path);
+  }
+
+  return (await response.json()) as T;
+};
+
+const fallbackSession = (phone: string, role: AuthRole): AuthSession => ({
+  accessToken: `demo-${role}-${phone.slice(-4) || "0000"}`,
   user: {
-    id: `passenger-${phone.slice(-4) || "0000"}`,
-    role: "passenger",
-    fullName: "Pasajera Demo",
+    id: `${role}-${phone.slice(-4) || "0000"}`,
+    role,
+    fullName: role === "driver" ? "Conductora Demo" : "Pasajera Demo",
     phone
   }
 });
 
-const signInPassenger = async (payload: SignInPayload): Promise<AuthSession> => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/auth/sign-in`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json"
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error("sign_in_failed");
-    }
-
-    return (await response.json()) as AuthSession;
-  } catch {
-    return demoSessionFromPhone(payload.phone);
+const nextStatusForTrip = (trip: RideTrip) => {
+  if (trip.status === "matched") {
+    return "driver_en_route";
   }
+
+  const index = DRIVER_STATUS_FLOW.indexOf(
+    trip.status as DriverTripStatusUpdate["status"]
+  );
+  return index >= 0 ? DRIVER_STATUS_FLOW[index + 1] ?? null : null;
 };
 
-const loadPassengerHome = async (session: AuthSession): Promise<HomeBootstrap> => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/home/passenger`, {
-      headers: {
-        Authorization: `Bearer ${session.accessToken}`
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error("home_bootstrap_failed");
-    }
-
-    return (await response.json()) as HomeBootstrap;
-  } catch {
-    return DEFAULT_HOME_BOOTSTRAP;
-  }
-};
-
-const estimateRide = async (
-  session: AuthSession,
-  payload: RideEstimateRequest
-): Promise<RideEstimate> => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/trips/estimate`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.accessToken}`
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error("estimate_failed");
-    }
-
-    return (await response.json()) as RideEstimate;
-  } catch {
-    const latitudeDelta = payload.destination.latitude - payload.origin.latitude;
-    const longitudeDelta = payload.destination.longitude - payload.origin.longitude;
-    const roughDistanceKm = Number(
-      Math.max(
-        1.2,
-        Math.sqrt(
-          latitudeDelta * latitudeDelta * 111 * 111 +
-            longitudeDelta * longitudeDelta * 111 * 111
-        )
-      ).toFixed(1)
-    );
-
-    return {
-      currency: "PEN",
-      distanceKm: roughDistanceKm,
-      durationMinutes: Math.max(8, Math.round(roughDistanceKm * 3.2)),
-      estimatedFare: Number((5.5 + roughDistanceKm * 1.8).toFixed(2))
-    };
-  }
-};
-
-const requestTrip = async (
-  session: AuthSession,
-  payload: CreateTripRequest
-): Promise<RequestedTrip> => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/trips`, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-        Authorization: `Bearer ${session.accessToken}`
-      },
-      body: JSON.stringify(payload)
-    });
-
-    if (!response.ok) {
-      throw new Error("request_trip_failed");
-    }
-
-    return (await response.json()) as RequestedTrip;
-  } catch {
-    return {
-      id: `trip-local-${Date.now()}`,
-      passengerId: payload.passengerId,
-      origin: payload.origin,
-      destination: payload.destination,
-      estimate: await estimateRide(session, payload),
-      status: "requested",
-      requestedAt: new Date().toISOString()
-    };
-  }
-};
-
-const loadActiveTrip = async (
-  session: AuthSession
-): Promise<RequestedTrip | null> => {
-  try {
-    const response = await fetch(`${API_BASE_URL}/trips/active`, {
-      headers: {
-        Authorization: `Bearer ${session.accessToken}`
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error("active_trip_failed");
-    }
-
-    const payload = (await response.json()) as { trip: RequestedTrip | null };
-    return payload.trip;
-  } catch {
-    return null;
-  }
-};
+const regionFromPoints = (origin: RidePoint, destination: RidePoint): MapRegion => ({
+  latitude: (origin.latitude + destination.latitude) / 2,
+  longitude: (origin.longitude + destination.longitude) / 2,
+  latitudeDelta: Math.max(Math.abs(origin.latitude - destination.latitude), 0.02) * 2.2,
+  longitudeDelta:
+    Math.max(Math.abs(origin.longitude - destination.longitude), 0.02) * 2.2
+});
 
 export default function App() {
+  const [role, setRole] = useState<AuthRole>("passenger");
   const [phone, setPhone] = useState("999111222");
   const [session, setSession] = useState<AuthSession | null>(null);
-  const [home, setHome] = useState<HomeBootstrap | null>(null);
-  const [origin, setOrigin] = useState<RidePoint | null>(null);
-  const [selectedDestination, setSelectedDestination] = useState<RidePoint | null>(null);
-  const [estimate, setEstimate] = useState<RideEstimate | null>(null);
-  const [activeTrip, setActiveTrip] = useState<RequestedTrip | null>(null);
-  const [mapRegion, setMapRegion] = useState<MapRegion>(
-    DEFAULT_HOME_BOOTSTRAP.mapRegion
-  );
   const [loading, setLoading] = useState(false);
-  const [estimating, setEstimating] = useState(false);
-  const [requestingTrip, setRequestingTrip] = useState(false);
+  const [mapRegion, setMapRegion] = useState<MapRegion>(DEFAULT_HOME_BOOTSTRAP.mapRegion);
+  const [origin, setOrigin] = useState<RidePoint | null>(null);
+  const [passengerHome, setPassengerHome] = useState<HomeBootstrap | null>(null);
+  const [destination, setDestination] = useState<RidePoint | null>(null);
+  const [estimate, setEstimate] = useState<RideEstimate | null>(null);
+  const [activeTrip, setActiveTrip] = useState<RideTrip | null>(null);
+  const [driverQueue, setDriverQueue] = useState<RideTrip[]>([]);
+  const [driverHome, setDriverHome] = useState<DriverQueueSummary | null>(null);
 
   useEffect(() => {
     if (!session) {
       return;
     }
 
-    let isMounted = true;
+    let mounted = true;
 
-    const bootstrapHome = async () => {
+    const bootstrap = async () => {
       setLoading(true);
-
       try {
-        const [bootstrap, trackedTrip, locationPermission] = await Promise.all([
-          loadPassengerHome(session),
-          loadActiveTrip(session),
-          Location.requestForegroundPermissionsAsync()
-        ]);
+        if (session.user.role === "passenger") {
+          const [home, trip, permission] = await Promise.all([
+            api<HomeBootstrap>("/home/passenger", session).catch(() => DEFAULT_HOME_BOOTSTRAP),
+            api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
+            Location.requestForegroundPermissionsAsync()
+          ]);
 
-        if (!isMounted) {
-          return;
-        }
-
-        setHome(bootstrap);
-        setMapRegion(bootstrap.mapRegion);
-        setSelectedDestination(bootstrap.suggestedDestinations[0] ?? null);
-        setEstimate(null);
-        setActiveTrip(trackedTrip);
-
-        if (trackedTrip) {
-          setEstimate(trackedTrip.estimate);
-          setSelectedDestination(trackedTrip.destination);
-        }
-
-        if (locationPermission.status === "granted") {
-          const currentPosition = await Location.getCurrentPositionAsync({});
-
-          if (!isMounted) {
+          if (!mounted) {
             return;
           }
 
-          setMapRegion((currentRegion) => ({
-            ...currentRegion,
-            latitude: currentPosition.coords.latitude,
-            longitude: currentPosition.coords.longitude
-          }));
+          setPassengerHome(home);
+          setActiveTrip(trip.trip);
+          setDestination(trip.trip?.destination ?? home.suggestedDestinations[0] ?? null);
+          setEstimate(trip.trip?.estimate ?? null);
 
-          setOrigin({
-            label: "Ubicacion actual",
-            address: "Posicion detectada por el dispositivo",
-            latitude: currentPosition.coords.latitude,
-            longitude: currentPosition.coords.longitude
-          });
+          const fallbackOrigin: RidePoint = trip.trip?.origin ?? {
+            label: "Punto de recojo",
+            address: "Centro operativo inicial de DIVA DRIVE",
+            latitude: home.mapRegion.latitude,
+            longitude: home.mapRegion.longitude
+          };
+
+          if (permission.status === "granted") {
+            const current = await Location.getCurrentPositionAsync({});
+            if (!mounted) {
+              return;
+            }
+
+            setOrigin(
+              trip.trip?.origin ?? {
+                label: "Ubicacion actual",
+                address: "Posicion detectada por el dispositivo",
+                latitude: current.coords.latitude,
+                longitude: current.coords.longitude
+              }
+            );
+          } else {
+            setOrigin(fallbackOrigin);
+          }
         } else {
-          setOrigin({
-            label: "Punto de recojo",
-            address: "Centro operativo inicial de DIVA DRIVE",
-            latitude: bootstrap.mapRegion.latitude,
-            longitude: bootstrap.mapRegion.longitude
-          });
-        }
-      } catch {
-        if (isMounted) {
-          Alert.alert(
-            "No se pudo cargar la home",
-            "Usaremos la configuracion base mientras completamos el backend."
-          );
-          setHome(DEFAULT_HOME_BOOTSTRAP);
-          setSelectedDestination(DEFAULT_HOME_BOOTSTRAP.suggestedDestinations[0] ?? null);
-          setOrigin({
-            label: "Punto de recojo",
-            address: "Centro operativo inicial de DIVA DRIVE",
-            latitude: DEFAULT_HOME_BOOTSTRAP.mapRegion.latitude,
-            longitude: DEFAULT_HOME_BOOTSTRAP.mapRegion.longitude
-          });
+          const [home, queue, trip] = await Promise.all([
+            api<DriverQueueSummary>("/home/driver", session).catch(() => ({
+              queueSize: 0,
+              activeTrip: null
+            })),
+            api<{ trips: RideTrip[] }>("/driver/trips/queue", session).catch(() => ({ trips: [] })),
+            api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null }))
+          ]);
+
+          if (!mounted) {
+            return;
+          }
+
+          setDriverHome(home);
+          setDriverQueue(queue.trips);
+          setActiveTrip(trip.trip ?? home.activeTrip);
         }
       } finally {
-        if (isMounted) {
+        if (mounted) {
           setLoading(false);
         }
       }
     };
 
-    void bootstrapHome();
-
+    void bootstrap();
     return () => {
-      isMounted = false;
+      mounted = false;
     };
   }, [session]);
 
   useEffect(() => {
-    if (!session || !activeTrip) {
+    if (!session) {
       return;
     }
 
-    const interval = setInterval(() => {
-      void loadActiveTrip(session).then((trackedTrip) => {
-        if (!trackedTrip) {
-          return;
-        }
-
-        setActiveTrip(trackedTrip);
-        setHome((currentHome) =>
-          currentHome
-            ? {
-                ...currentHome,
-                activeTripStatus: trackedTrip.status
-              }
-            : currentHome
-        );
-      });
+    const timer = setInterval(() => {
+      if (session.user.role === "passenger") {
+        void api<{ trip: RideTrip | null }>("/trips/active", session)
+          .then((payload) => setActiveTrip(payload.trip))
+          .catch(() => undefined);
+      } else {
+        void Promise.all([
+          api<{ trips: RideTrip[] }>("/driver/trips/queue", session).catch(() => ({ trips: [] })),
+          api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
+          api<DriverQueueSummary>("/home/driver", session).catch(() => ({
+            queueSize: 0,
+            activeTrip: null
+          }))
+        ]).then(([queue, trip, home]) => {
+          setDriverQueue(queue.trips);
+          setActiveTrip(trip.trip ?? home.activeTrip);
+          setDriverHome(home);
+        });
+      }
     }, 4000);
 
     return () => {
-      clearInterval(interval);
+      clearInterval(timer);
     };
-  }, [activeTrip, session]);
+  }, [session]);
 
   useEffect(() => {
-    if (!origin || !selectedDestination) {
-      return;
+    if (activeTrip) {
+      setMapRegion(regionFromPoints(activeTrip.origin, activeTrip.destination));
+    } else if (origin && destination) {
+      setMapRegion(regionFromPoints(origin, destination));
     }
-
-    const midpointLatitude =
-      (origin.latitude + selectedDestination.latitude) / 2;
-    const midpointLongitude =
-      (origin.longitude + selectedDestination.longitude) / 2;
-    const latitudeDelta =
-      Math.max(Math.abs(origin.latitude - selectedDestination.latitude), 0.02) *
-      2.2;
-    const longitudeDelta =
-      Math.max(Math.abs(origin.longitude - selectedDestination.longitude), 0.02) *
-      2.2;
-
-    setMapRegion({
-      latitude: midpointLatitude,
-      longitude: midpointLongitude,
-      latitudeDelta,
-      longitudeDelta
-    });
-  }, [origin, selectedDestination]);
+  }, [activeTrip, destination, origin]);
 
   const handleSignIn = async () => {
     if (phone.trim().length < 9) {
@@ -333,72 +227,106 @@ export default function App() {
     }
 
     setLoading(true);
-
     try {
-      const nextSession = await signInPassenger({
-        phone,
-        role: "passenger"
-      });
-
+      const nextSession = await api<AuthSession>("/auth/sign-in", undefined, {
+        method: "POST",
+        body: JSON.stringify({
+          phone,
+          role
+        })
+      }).catch(() => fallbackSession(phone, role));
       setSession(nextSession);
-    } catch {
-      Alert.alert("No pudimos iniciar sesion", "Intenta nuevamente.");
+      setActiveTrip(null);
+      setEstimate(null);
+      setDriverQueue([]);
     } finally {
       setLoading(false);
     }
   };
 
   const handleEstimate = async () => {
-    if (!session || !origin || !selectedDestination) {
-      Alert.alert("Faltan datos", "Necesitamos origen y destino para estimar.");
+    if (!session || !origin || !destination) {
       return;
     }
 
-    setEstimating(true);
-
+    setLoading(true);
     try {
-      const nextEstimate = await estimateRide(session, {
-        origin,
-        destination: selectedDestination
+      const nextEstimate = await api<RideEstimate>("/trips/estimate", session, {
+        method: "POST",
+        body: JSON.stringify({
+          origin,
+          destination
+        } satisfies RideEstimateRequest)
       });
-
       setEstimate(nextEstimate);
-    } catch {
-      Alert.alert("No pudimos estimar", "Intenta nuevamente en unos segundos.");
     } finally {
-      setEstimating(false);
+      setLoading(false);
     }
   };
 
   const handleRequestTrip = async () => {
-    if (!session || !origin || !selectedDestination) {
-      Alert.alert("Faltan datos", "Completa origen y destino antes de solicitar.");
+    if (!session || !origin || !destination) {
       return;
     }
 
-    setRequestingTrip(true);
-
+    setLoading(true);
     try {
-      const trip = await requestTrip(session, {
-        passengerId: session.user.id,
-        origin,
-        destination: selectedDestination
+      const trip = await api<RideTrip>("/trips", session, {
+        method: "POST",
+        body: JSON.stringify({
+          passengerId: session.user.id,
+          passengerName: session.user.fullName,
+          origin,
+          destination
+        })
       });
-
       setActiveTrip(trip);
       setEstimate(trip.estimate);
-      setHome((currentHome) =>
-        currentHome
-          ? {
-              ...currentHome,
-              activeTripStatus: trip.status
-            }
-          : currentHome
-      );
-    } catch {
-      Alert.alert("No pudimos solicitar", "Intenta nuevamente.");
     } finally {
-      setRequestingTrip(false);
+      setLoading(false);
+    }
+  };
+
+  const handleAcceptTrip = async (tripId: string) => {
+    if (!session) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const trip = await api<RideTrip>(`/driver/trips/${tripId}/accept`, session, {
+        method: "POST"
+      });
+      setActiveTrip(trip);
+      setDriverQueue((current) => current.filter((item) => item.id !== tripId));
+    } catch {
+      Alert.alert("Solicitud no disponible", "Otra conductora pudo tomarla primero.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleAdvanceTrip = async () => {
+    if (!session || !activeTrip) {
+      return;
+    }
+
+    const nextStatus = nextStatusForTrip(activeTrip);
+    if (!nextStatus) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      const trip = await api<RideTrip>(`/driver/trips/${activeTrip.id}/status`, session, {
+        method: "POST",
+        body: JSON.stringify({
+          status: nextStatus
+        } satisfies DriverTripStatusUpdate)
+      });
+      setActiveTrip(trip.status === "trip_completed" ? null : trip);
+    } finally {
+      setLoading(false);
     }
   };
 
@@ -406,38 +334,35 @@ export default function App() {
     return (
       <SafeAreaView style={styles.safe}>
         <StatusBar barStyle="dark-content" />
-        <View style={styles.authScreen}>
-          <Text style={styles.eyebrow}>DIVA DRIVE PASSENGER</Text>
+        <View style={styles.auth}>
+          <Text style={styles.kicker}>DIVA DRIVE</Text>
           <Text style={styles.title}>{SERVICE_NAME}</Text>
-          <Text style={styles.body}>
-            Base de autenticacion inicial para arrancar el flujo de pasajero.
-          </Text>
-
-          <View style={styles.authCard}>
-            <Text style={styles.label}>Telefono</Text>
+          <Text style={styles.copy}>Acceso inicial para pasajera y conductora.</Text>
+          <View style={styles.card}>
+            <View style={styles.row}>
+              {(["passenger", "driver"] as const).map((option) => (
+                <Pressable
+                  key={option}
+                  onPress={() => setRole(option)}
+                  style={[styles.chip, role === option && styles.chipActive]}
+                >
+                  <Text style={role === option ? styles.chipTextActive : styles.chipText}>
+                    {option === "passenger" ? "Pasajera" : "Conductora"}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
             <TextInput
               value={phone}
               onChangeText={setPhone}
               placeholder="999111222"
               keyboardType="phone-pad"
-              autoCapitalize="none"
               style={styles.input}
             />
-
-            <Pressable
-              disabled={loading}
-              onPress={handleSignIn}
-              style={({ pressed }) => [
-                styles.primaryButton,
-                pressed && styles.buttonPressed,
-                loading && styles.buttonDisabled
-              ]}
-            >
-              {loading ? (
-                <ActivityIndicator color="#fffaf6" />
-              ) : (
-                <Text style={styles.primaryButtonText}>Continuar como pasajera</Text>
-              )}
+            <Pressable onPress={handleSignIn} style={styles.button}>
+              <Text style={styles.buttonText}>
+                Continuar como {role === "passenger" ? "pasajera" : "conductora"}
+              </Text>
             </Pressable>
           </View>
         </View>
@@ -448,195 +373,145 @@ export default function App() {
   return (
     <SafeAreaView style={styles.safe}>
       <StatusBar barStyle="dark-content" />
-      <View style={styles.container}>
-        <View style={styles.mapShell}>
+      <View style={styles.shell}>
+        <View style={styles.mapWrap}>
           <MapView style={styles.map} initialRegion={mapRegion} region={mapRegion}>
-            {origin ? (
-              <Marker
-                coordinate={{
-                  latitude: origin.latitude,
-                  longitude: origin.longitude
-                }}
-                title={origin.label}
-                description={origin.address}
-              />
-            ) : null}
-            {selectedDestination ? (
-              <Marker
-                coordinate={{
-                  latitude: selectedDestination.latitude,
-                  longitude: selectedDestination.longitude
-                }}
-                title={selectedDestination.label}
-                description={selectedDestination.address}
-                pinColor="#c54b23"
-              />
-            ) : null}
-            {activeTrip?.currentDriverLocation ? (
-              <Marker
-                coordinate={activeTrip.currentDriverLocation}
-                title={activeTrip.driverName ?? "Conductora asignada"}
-                description="En camino a tu punto de recojo"
-                pinColor="#1d8f6a"
-              />
-            ) : null}
+            {session.user.role === "passenger" && origin ? <Marker coordinate={origin} title={origin.label} description={origin.address} /> : null}
+            {session.user.role === "passenger" && destination ? <Marker coordinate={destination} title={destination.label} description={destination.address} pinColor="#c54b23" /> : null}
+            {activeTrip ? <Marker coordinate={activeTrip.origin} title={`Recojo - ${activeTrip.passengerName}`} description={activeTrip.origin.address} /> : null}
+            {activeTrip ? <Marker coordinate={activeTrip.destination} title={`Destino - ${activeTrip.destination.label}`} description={activeTrip.destination.address} pinColor="#c54b23" /> : null}
+            {activeTrip?.currentDriverLocation ? <Marker coordinate={activeTrip.currentDriverLocation} title={activeTrip.driverName ?? session.user.fullName} description="Ubicacion de la conductora" pinColor="#1d8f6a" /> : null}
           </MapView>
-
-          <View style={styles.topOverlay}>
-            <Text style={styles.overlayEyebrow}>{home?.city ?? DEFAULT_HOME_BOOTSTRAP.city}</Text>
-            <Text style={styles.overlayTitle}>Hola, {session.user.fullName}</Text>
-            <Text style={styles.overlayBody}>
-              El mapa es el primer viewport del flujo principal, tal como define
-              la base del producto.
+          <View style={styles.overlay}>
+            <Text style={styles.kicker}>
+              {session.user.role === "passenger" ? passengerHome?.city ?? DEFAULT_HOME_BOOTSTRAP.city : DEFAULT_HOME_BOOTSTRAP.city}
+            </Text>
+            <Text style={styles.overlayTitle}>
+              {session.user.role === "passenger" ? `Hola, ${session.user.fullName}` : `Conductora: ${session.user.fullName}`}
+            </Text>
+            <Text style={styles.overlayCopy}>
+              {session.user.role === "passenger"
+                ? "Solicitud y tracking del viaje desde el primer viewport."
+                : "Aceptacion real de solicitudes y control manual del viaje."}
             </Text>
           </View>
         </View>
 
-        <ScrollView
-          contentContainerStyle={styles.panelContent}
-          showsVerticalScrollIndicator={false}
-        >
-          {loading || !home ? (
-            <View style={styles.loadingCard}>
-              <ActivityIndicator color="#c54b23" />
-              <Text style={styles.loadingText}>Preparando tu home operativa...</Text>
-            </View>
+        <ScrollView contentContainerStyle={styles.content}>
+          {loading ? (
+            <View style={styles.card}><ActivityIndicator color="#c54b23" /></View>
+          ) : null}
+
+          {session.user.role === "passenger" ? (
+            <>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Origen</Text>
+                <Text style={styles.strong}>{origin?.label ?? "Cargando"}</Text>
+                <Text style={styles.muted}>{origin?.address ?? "Preparando punto de recojo"}</Text>
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Destino</Text>
+                {(passengerHome?.suggestedDestinations ?? DEFAULT_HOME_BOOTSTRAP.suggestedDestinations).map((item) => (
+                  <Pressable
+                    key={item.label}
+                    onPress={() => {
+                      setDestination(item);
+                      setEstimate(null);
+                    }}
+                    style={[styles.choice, destination?.label === item.label && styles.choiceActive]}
+                  >
+                    <Text style={styles.strong}>{item.label}</Text>
+                    <Text style={styles.muted}>{item.address}</Text>
+                  </Pressable>
+                ))}
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Estimacion</Text>
+                <Text style={styles.strong}>
+                  {estimate ? `${estimate.currency} ${estimate.estimatedFare.toFixed(2)}` : "Pendiente"}
+                </Text>
+                <Text style={styles.muted}>
+                  {estimate ? `${estimate.distanceKm} km - ${estimate.durationMinutes} min aprox.` : "Calcula antes de solicitar"}
+                </Text>
+                <Pressable onPress={handleEstimate} style={styles.altButton}>
+                  <Text style={styles.altButtonText}>Calcular estimacion</Text>
+                </Pressable>
+                <Pressable onPress={handleRequestTrip} style={styles.button}>
+                  <Text style={styles.buttonText}>Solicitar viaje</Text>
+                </Pressable>
+              </View>
+              <View style={styles.card}>
+                <Text style={styles.heading}>Estado</Text>
+                <Text style={styles.strong}>{activeTrip?.status ?? "Sin viaje activo"}</Text>
+                <Text style={styles.muted}>
+                  {activeTrip?.driverName
+                    ? `Conductora: ${activeTrip.driverName}`
+                    : "Esperando asignacion"}
+                </Text>
+              </View>
+            </>
           ) : (
             <>
               <View style={styles.card}>
-                <Text style={styles.cardTitle}>Origen</Text>
-                <Text style={styles.itemStrong}>
-                  {origin?.label ?? "Cargando ubicacion"}
+                <Text style={styles.heading}>Resumen operativo</Text>
+                <Text style={styles.strong}>Cola: {driverQueue.length}</Text>
+                <Text style={styles.muted}>Activo: {activeTrip?.status ?? "Ninguno"}</Text>
+                <Text style={styles.muted}>
+                  Home: {driverHome?.queueSize ?? driverQueue.length} solicitudes visibles
                 </Text>
-                <Text style={styles.quickActionHint}>
-                  {origin?.address ?? "Estamos preparando tu punto de recojo"}
-                </Text>
               </View>
-
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Destino</Text>
-                {home.suggestedDestinations.map((destination) => {
-                  const isSelected = destination.label === selectedDestination?.label;
-
-                  return (
-                    <Pressable
-                      key={destination.label}
-                      onPress={() => {
-                        setSelectedDestination(destination);
-                        setEstimate(null);
-                      }}
-                      style={[
-                        styles.destinationRow,
-                        isSelected && styles.destinationRowSelected
-                      ]}
-                    >
-                      <Text
-                        style={[
-                          styles.quickActionLabel,
-                          isSelected && styles.destinationLabelSelected
-                        ]}
-                      >
-                        {destination.label}
-                      </Text>
-                      <Text style={styles.quickActionHint}>{destination.address}</Text>
-                    </Pressable>
-                  );
-                })}
-              </View>
-
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Estimacion</Text>
-                {estimate ? (
-                  <>
-                    <Text style={styles.itemStrong}>
-                      {estimate.currency} {estimate.estimatedFare.toFixed(2)}
+              {activeTrip ? (
+                <>
+                  <View style={styles.card}>
+                    <Text style={styles.heading}>Viaje asignado</Text>
+                    <Text style={styles.strong}>{activeTrip.passengerName}</Text>
+                    <Text style={styles.muted}>
+                      {activeTrip.origin.label} {"->"} {activeTrip.destination.label}
                     </Text>
-                    <Text style={styles.item}>
-                      {estimate.distanceKm} km - {estimate.durationMinutes} min aprox.
-                    </Text>
-                  </>
-                ) : (
-                  <Text style={styles.item}>Aun no calculada.</Text>
-                )}
-
-                <Pressable
-                  disabled={estimating}
-                  onPress={handleEstimate}
-                  style={({ pressed }) => [
-                    styles.secondaryButton,
-                    pressed && styles.buttonPressed,
-                    estimating && styles.buttonDisabled
-                  ]}
-                >
-                  {estimating ? (
-                    <ActivityIndicator color="#c54b23" />
-                  ) : (
-                    <Text style={styles.secondaryButtonText}>Calcular estimacion</Text>
-                  )}
-                </Pressable>
-
-                <Pressable
-                  disabled={requestingTrip || !estimate}
-                  onPress={handleRequestTrip}
-                  style={({ pressed }) => [
-                    styles.primaryButton,
-                    styles.requestButton,
-                    pressed && styles.buttonPressed,
-                    (requestingTrip || !estimate) && styles.buttonDisabled
-                  ]}
-                >
-                  {requestingTrip ? (
-                    <ActivityIndicator color="#fffaf6" />
-                  ) : (
-                    <Text style={styles.primaryButtonText}>Solicitar viaje</Text>
-                  )}
-                </Pressable>
-              </View>
-
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Estado del viaje</Text>
-                <Text style={styles.itemStrong}>
-                  {activeTrip?.status ??
-                    home.activeTripStatus ??
-                    "Sin viaje activo. Lista para solicitar."}
-                </Text>
-                {activeTrip ? (
-                  <>
-                    <Text style={styles.item}>Viaje: {activeTrip.id}</Text>
-                    <Text style={styles.item}>
-                      Destino: {activeTrip.destination.label}
-                    </Text>
-                    {activeTrip.driverName ? (
-                      <Text style={styles.item}>
-                        Conductora: {activeTrip.driverName}
-                      </Text>
-                    ) : null}
-                    {activeTrip.driverEtaMinutes ? (
-                      <Text style={styles.item}>
-                        ETA recojo: {activeTrip.driverEtaMinutes} min
-                      </Text>
-                    ) : null}
-                  </>
-                ) : null}
-              </View>
-
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Acciones rapidas</Text>
-                {home.quickActions.map((action) => (
-                  <View key={action.id} style={styles.quickActionRow}>
-                    <Text style={styles.quickActionLabel}>{action.label}</Text>
-                    <Text style={styles.quickActionHint}>{action.hint}</Text>
+                    <Text style={styles.muted}>Estado: {activeTrip.status}</Text>
                   </View>
-                ))}
-              </View>
-
-              <View style={styles.card}>
-                <Text style={styles.cardTitle}>Sesion</Text>
-                <Text style={styles.item}>Rol: {session.user.role}</Text>
-                <Text style={styles.item}>Telefono: {session.user.phone}</Text>
-              </View>
+                  <View style={styles.card}>
+                    <Text style={styles.heading}>Control manual</Text>
+                    <Text style={styles.muted}>
+                      Siguiente: {nextStatusForTrip(activeTrip) ?? "flujo completo"}
+                    </Text>
+                    <Pressable onPress={handleAdvanceTrip} style={styles.button}>
+                      <Text style={styles.buttonText}>
+                        {nextStatusForTrip(activeTrip)
+                          ? `Marcar ${nextStatusForTrip(activeTrip)}`
+                          : "Viaje completado"}
+                      </Text>
+                    </Pressable>
+                  </View>
+                </>
+              ) : (
+                <View style={styles.card}>
+                  <Text style={styles.heading}>Solicitudes pendientes</Text>
+                  {driverQueue.length === 0 ? (
+                    <Text style={styles.muted}>No hay solicitudes nuevas.</Text>
+                  ) : (
+                    driverQueue.map((trip) => (
+                      <View key={trip.id} style={styles.choice}>
+                        <Text style={styles.strong}>{trip.passengerName}</Text>
+                        <Text style={styles.muted}>
+                          {trip.origin.label} {"->"} {trip.destination.label}
+                        </Text>
+                        <Text style={styles.muted}>{trip.estimate.currency} {trip.estimate.estimatedFare.toFixed(2)}</Text>
+                        <Pressable onPress={() => handleAcceptTrip(trip.id)} style={styles.button}>
+                          <Text style={styles.buttonText}>Aceptar solicitud</Text>
+                        </Pressable>
+                      </View>
+                    ))
+                  )}
+                </View>
+              )}
             </>
           )}
+          <View style={styles.card}>
+            <Text style={styles.heading}>Sesion</Text>
+            <Text style={styles.muted}>Rol: {session.user.role}</Text>
+            <Text style={styles.muted}>Telefono: {session.user.phone}</Text>
+          </View>
         </ScrollView>
       </View>
     </SafeAreaView>
@@ -644,200 +519,32 @@ export default function App() {
 }
 
 const styles = StyleSheet.create({
-  safe: {
-    flex: 1,
-    backgroundColor: "#f7f0e8"
-  },
-  container: {
-    flex: 1,
-    backgroundColor: "#f7f0e8"
-  },
-  authScreen: {
-    flex: 1,
-    paddingHorizontal: 24,
-    paddingVertical: 32,
-    justifyContent: "center",
-    backgroundColor: "#f7f0e8"
-  },
-  eyebrow: {
-    color: "#c54b23",
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 2,
-    marginBottom: 12
-  },
-  title: {
-    color: "#1d1c1a",
-    fontSize: 42,
-    fontWeight: "800",
-    lineHeight: 44
-  },
-  body: {
-    color: "#3f3a35",
-    fontSize: 18,
-    lineHeight: 28,
-    marginTop: 16
-  },
-  authCard: {
-    marginTop: 28,
-    padding: 20,
-    borderRadius: 20,
-    backgroundColor: "#fffaf6"
-  },
-  label: {
-    color: "#3f3a35",
-    fontSize: 14,
-    fontWeight: "700",
-    marginBottom: 8
-  },
-  input: {
-    borderWidth: 1,
-    borderColor: "#e3d8ce",
-    borderRadius: 14,
-    paddingHorizontal: 16,
-    paddingVertical: 14,
-    fontSize: 16,
-    color: "#1d1c1a",
-    backgroundColor: "#ffffff"
-  },
-  primaryButton: {
-    marginTop: 16,
-    minHeight: 52,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    backgroundColor: "#c54b23"
-  },
-  primaryButtonText: {
-    color: "#fffaf6",
-    fontSize: 16,
-    fontWeight: "800"
-  },
-  buttonPressed: {
-    opacity: 0.9
-  },
-  buttonDisabled: {
-    opacity: 0.6
-  },
-  mapShell: {
-    height: "56%",
-    minHeight: 360
-  },
-  map: {
-    ...StyleSheet.absoluteFillObject
-  },
-  topOverlay: {
-    marginTop: 18,
-    marginHorizontal: 18,
-    padding: 18,
-    borderRadius: 22,
-    backgroundColor: "rgba(255, 250, 246, 0.94)"
-  },
-  overlayEyebrow: {
-    color: "#c54b23",
-    fontSize: 12,
-    fontWeight: "700",
-    letterSpacing: 1.8,
-    textTransform: "uppercase"
-  },
-  overlayTitle: {
-    marginTop: 6,
-    color: "#1d1c1a",
-    fontSize: 26,
-    fontWeight: "800"
-  },
-  overlayBody: {
-    marginTop: 8,
-    color: "#4d4741",
-    fontSize: 15,
-    lineHeight: 22
-  },
-  panelContent: {
-    paddingHorizontal: 18,
-    paddingTop: 18,
-    paddingBottom: 32
-  },
-  card: {
-    marginBottom: 14,
-    padding: 20,
-    borderRadius: 20,
-    backgroundColor: "#fffaf6"
-  },
-  loadingCard: {
-    marginBottom: 14,
-    padding: 20,
-    borderRadius: 20,
-    backgroundColor: "#fffaf6",
-    alignItems: "center",
-    gap: 12
-  },
-  loadingText: {
-    color: "#4d4741",
-    fontSize: 15
-  },
-  cardTitle: {
-    color: "#1d1c1a",
-    fontSize: 20,
-    fontWeight: "700",
-    marginBottom: 12
-  },
-  item: {
-    color: "#3f3a35",
-    fontSize: 16,
-    marginBottom: 8
-  },
-  itemStrong: {
-    color: "#1d1c1a",
-    fontSize: 18,
-    fontWeight: "700",
-    marginBottom: 8
-  },
-  quickActionRow: {
-    paddingVertical: 10,
-    borderBottomWidth: 1,
-    borderBottomColor: "#f0e5dc"
-  },
-  destinationRow: {
-    paddingVertical: 12,
-    paddingHorizontal: 12,
-    borderRadius: 16,
-    borderWidth: 1,
-    borderColor: "#f0e5dc",
-    marginBottom: 10
-  },
-  destinationRowSelected: {
-    borderColor: "#c54b23",
-    backgroundColor: "#fff1ea"
-  },
-  quickActionLabel: {
-    color: "#1d1c1a",
-    fontSize: 16,
-    fontWeight: "700"
-  },
-  destinationLabelSelected: {
-    color: "#a53a17"
-  },
-  quickActionHint: {
-    color: "#5a534d",
-    fontSize: 14,
-    marginTop: 4
-  },
-  secondaryButton: {
-    marginTop: 12,
-    minHeight: 48,
-    borderRadius: 14,
-    alignItems: "center",
-    justifyContent: "center",
-    borderWidth: 1,
-    borderColor: "#c54b23",
-    backgroundColor: "#fffaf6"
-  },
-  secondaryButtonText: {
-    color: "#c54b23",
-    fontSize: 15,
-    fontWeight: "800"
-  },
-  requestButton: {
-    marginTop: 12
-  }
+  safe: { flex: 1, backgroundColor: "#f7f0e8" },
+  shell: { flex: 1, backgroundColor: "#f7f0e8" },
+  auth: { flex: 1, justifyContent: "center", padding: 24 },
+  mapWrap: { height: "56%", minHeight: 360 },
+  map: { ...StyleSheet.absoluteFillObject },
+  overlay: { margin: 18, padding: 18, borderRadius: 22, backgroundColor: "rgba(255,250,246,0.94)" },
+  content: { padding: 18, paddingBottom: 32 },
+  card: { marginBottom: 14, padding: 18, borderRadius: 20, backgroundColor: "#fffaf6" },
+  row: { flexDirection: "row", gap: 12, marginBottom: 16 },
+  chip: { flex: 1, paddingVertical: 12, borderWidth: 1, borderColor: "#eadfd5", borderRadius: 14, alignItems: "center" },
+  chipActive: { borderColor: "#c54b23", backgroundColor: "#fff1ea" },
+  chipText: { color: "#5a534d", fontWeight: "700" },
+  chipTextActive: { color: "#a53a17", fontWeight: "700" },
+  input: { borderWidth: 1, borderColor: "#e3d8ce", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14, backgroundColor: "#fff" },
+  button: { marginTop: 12, minHeight: 50, borderRadius: 14, backgroundColor: "#c54b23", alignItems: "center", justifyContent: "center" },
+  altButton: { marginTop: 12, minHeight: 50, borderRadius: 14, borderWidth: 1, borderColor: "#c54b23", alignItems: "center", justifyContent: "center" },
+  buttonText: { color: "#fffaf6", fontWeight: "800", fontSize: 16 },
+  altButtonText: { color: "#c54b23", fontWeight: "800", fontSize: 15 },
+  kicker: { color: "#c54b23", fontSize: 12, fontWeight: "700", letterSpacing: 2, textTransform: "uppercase" },
+  title: { marginTop: 8, color: "#1d1c1a", fontSize: 42, fontWeight: "800" },
+  copy: { marginTop: 12, color: "#4d4741", fontSize: 18, lineHeight: 26 },
+  overlayTitle: { marginTop: 6, color: "#1d1c1a", fontSize: 26, fontWeight: "800" },
+  overlayCopy: { marginTop: 8, color: "#4d4741", fontSize: 15, lineHeight: 22 },
+  heading: { color: "#1d1c1a", fontSize: 20, fontWeight: "700", marginBottom: 10 },
+  strong: { color: "#1d1c1a", fontSize: 17, fontWeight: "700", marginBottom: 6 },
+  muted: { color: "#5a534d", fontSize: 14, marginBottom: 6 },
+  choice: { padding: 12, borderRadius: 16, borderWidth: 1, borderColor: "#f0e5dc", marginBottom: 10 },
+  choiceActive: { borderColor: "#c54b23", backgroundColor: "#fff1ea" }
 });
