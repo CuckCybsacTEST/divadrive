@@ -6,7 +6,12 @@
     "version": "0.1.0",
     "orientation": "portrait",
     "platforms": ["android"],
-    "assetBundlePatterns": ["**/*"]
+    "assetBundlePatterns": ["**/*"],
+    "android": {
+      "permissions": [
+        "ACCESS_COARSE_LOCATION",
+        "ACCESS_FINE_LOCATION"
+      ]
+    }
   }
 }
-

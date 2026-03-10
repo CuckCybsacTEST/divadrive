@@ -20,6 +20,12 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - `npm run typecheck`
 - `npm run build`
 
+## Slice actual
+- autenticacion base de pasajero con endpoint demo en `apps/api`
+- bootstrap inicial de home de pasajero desde backend
+- home movil con mapa real como primer viewport
+- contratos compartidos de sesion y home en `packages/domain`
+
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
 - `VISION_AND_SCOPE.md`
@@ -42,4 +48,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Implementar el primer slice vertical del producto: autenticacion base, home movil con mapa y el esqueleto de viajes apoyado en `packages/domain`.
+Implementar el siguiente slice vertical del producto: seleccion de origen y destino, estimacion base y solicitud inicial de viaje apoyada en `packages/domain`.
