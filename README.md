@@ -32,6 +32,8 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - panel web operativo consumiendo cola, activos y completados desde `api`
 - incidencias persistidas en `apps/api/data/incidents.json`
 - cancelaciones de viaje y visibilidad de incidencias/cancelados en panel
+- panel web con login por `operator` o `admin` y endpoints `ops` protegidos
+- cambio de estado de incidencias desde panel autenticado
 
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
@@ -55,4 +57,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Implementar el siguiente slice vertical del producto: autenticacion administrativa real, permisos por panel y gestion de incidencias desde web.
+Implementar el siguiente slice vertical del producto: onboarding documental de conductoras y gestion administrativa real de conductoras/pasajeros desde panel.

@@ -70,7 +70,7 @@ export interface AuthSession {
 
 export interface SignInPayload {
   phone: string;
-  role: Extract<UserRole, "passenger" | "driver">;
+  role: UserRole;
 }
 
 export interface MapRegion {
@@ -168,6 +168,10 @@ export interface OpsDashboardSnapshot {
     cancelled: number;
     openIncidents: number;
   };
+}
+
+export interface IncidentStatusUpdate {
+  status: IncidentStatus;
 }
 
 export interface CreateIncidentPayload {

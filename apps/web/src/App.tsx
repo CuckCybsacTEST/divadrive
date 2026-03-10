@@ -1,11 +1,14 @@
-import { useEffect, useState } from "react";
+import { type ReactNode, useEffect, useState } from "react";
 import {
   SERVICE_NAME,
+  type AuthSession,
+  type IncidentStatus,
   type OpsDashboardSnapshot,
   type RideTrip
 } from "@diva-drive/domain";
 
 const API_BASE_URL = "http://127.0.0.1:4000";
+const STORAGE_KEY = "diva-drive-ops-session";
 
 const emptySnapshot: OpsDashboardSnapshot = {
   queueTrips: [],
@@ -25,24 +28,64 @@ const emptySnapshot: OpsDashboardSnapshot = {
 const formatMoney = (trip: RideTrip) =>
   `${trip.estimate.currency} ${trip.estimate.estimatedFare.toFixed(2)}`;
 
+const authorizedFetch = async <T,>(
+  session: AuthSession,
+  path: string,
+  options?: RequestInit
+) => {
+  const response = await fetch(`${API_BASE_URL}${path}`, {
+    ...options,
+    headers: {
+      "Content-Type": "application/json",
+      Authorization: `Bearer ${session.accessToken}`,
+      ...(options?.headers ?? {})
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(path);
+  }
+
+  return (await response.json()) as T;
+};
+
 export default function App() {
+  const [phone, setPhone] = useState("999777111");
+  const [role, setRole] = useState<"operator" | "admin">("operator");
+  const [session, setSession] = useState<AuthSession | null>(null);
   const [snapshot, setSnapshot] = useState<OpsDashboardSnapshot>(emptySnapshot);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
+    const savedSession = window.localStorage.getItem(STORAGE_KEY);
+    if (!savedSession) {
+      setLoading(false);
+      return;
+    }
+
+    try {
+      const parsed = JSON.parse(savedSession) as AuthSession;
+      setSession(parsed);
+    } catch {
+      window.localStorage.removeItem(STORAGE_KEY);
+      setLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!session) {
+      return;
+    }
+
     let mounted = true;
 
     const loadDashboard = async () => {
       try {
-        const response = await fetch(`${API_BASE_URL}/ops/dashboard`);
-
-        if (!response.ok) {
-          throw new Error("dashboard_unavailable");
-        }
-
-        const nextSnapshot =
-          (await response.json()) as OpsDashboardSnapshot;
+        const nextSnapshot = await authorizedFetch<OpsDashboardSnapshot>(
+          session,
+          "/ops/dashboard"
+        );
 
         if (mounted) {
           setSnapshot(nextSnapshot);
@@ -50,7 +93,7 @@ export default function App() {
         }
       } catch {
         if (mounted) {
-          setError("No pudimos cargar el panel operativo.");
+          setError("No pudimos cargar el panel o la sesion vencio.");
         }
       } finally {
         if (mounted) {
@@ -68,50 +111,138 @@ export default function App() {
       mounted = false;
       clearInterval(interval);
     };
-  }, []);
+  }, [session]);
+
+  const handleSignIn = async () => {
+    setLoading(true);
+    try {
+      const nextSession = await fetch(`${API_BASE_URL}/auth/sign-in`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json"
+        },
+        body: JSON.stringify({
+          phone,
+          role
+        })
+      }).then(async (response) => {
+        if (!response.ok) {
+          throw new Error("sign_in_failed");
+        }
+        return (await response.json()) as AuthSession;
+      });
+
+      setSession(nextSession);
+      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextSession));
+      setError(null);
+    } catch {
+      setError("No pudimos iniciar sesion en el panel.");
+      setLoading(false);
+    }
+  };
+
+  const handleSignOut = () => {
+    window.localStorage.removeItem(STORAGE_KEY);
+    setSession(null);
+    setSnapshot(emptySnapshot);
+    setLoading(false);
+  };
+
+  const handleIncidentStatus = async (
+    incidentId: string,
+    status: IncidentStatus
+  ) => {
+    if (!session) {
+      return;
+    }
+
+    try {
+      await authorizedFetch(session, `/ops/incidents/${incidentId}/status`, {
+        method: "POST",
+        body: JSON.stringify({ status })
+      });
+
+      const nextSnapshot = await authorizedFetch<OpsDashboardSnapshot>(
+        session,
+        "/ops/dashboard"
+      );
+      setSnapshot(nextSnapshot);
+    } catch {
+      setError("No pudimos actualizar la incidencia.");
+    }
+  };
+
+  if (!session) {
+    return (
+      <main className="shell">
+        <section className="hero">
+          <p className="eyebrow">Panel Seguro</p>
+          <h1>{SERVICE_NAME}</h1>
+          <p className="lede">
+            Acceso administrativo para operador o admin antes de ver la operacion.
+          </p>
+        </section>
+
+        <section className="panel authPanel">
+          <h2>Iniciar sesion</h2>
+          <div className="roleSwitch">
+            {(["operator", "admin"] as const).map((option) => (
+              <button
+                key={option}
+                className={role === option ? "roleBtn active" : "roleBtn"}
+                onClick={() => setRole(option)}
+              >
+                {option === "operator" ? "Operador" : "Admin"}
+              </button>
+            ))}
+          </div>
+          <input
+            value={phone}
+            onChange={(event) => setPhone(event.target.value)}
+            placeholder="999777111"
+            className="authInput"
+          />
+          <button className="primaryAction" onClick={handleSignIn}>
+            Entrar al panel
+          </button>
+          {error ? <p className="errorText">{error}</p> : null}
+        </section>
+      </main>
+    );
+  }
 
   return (
     <main className="shell">
-      <section className="hero">
-        <p className="eyebrow">Panel Operativo</p>
-        <h1>{SERVICE_NAME}</h1>
-        <p className="lede">
-          Cola, viajes activos y completados desde un snapshot vivo del backend.
-        </p>
+      <section className="hero heroRow">
+        <div>
+          <p className="eyebrow">Panel Operativo</p>
+          <h1>{SERVICE_NAME}</h1>
+          <p className="lede">
+            Cola, viajes e incidencias desde un dashboard protegido por sesion.
+          </p>
+        </div>
+        <div className="sessionBox">
+          <p>{session.user.fullName}</p>
+          <p>{session.user.role}</p>
+          <button className="secondaryAction" onClick={handleSignOut}>
+            Cerrar sesion
+          </button>
+        </div>
       </section>
 
       <section className="stats">
-        <article className="stat">
-          <span>En cola</span>
-          <strong>{snapshot.totals.requested}</strong>
-        </article>
-        <article className="stat">
-          <span>Activos</span>
-          <strong>{snapshot.totals.active}</strong>
-        </article>
-        <article className="stat">
-          <span>Completados</span>
-          <strong>{snapshot.totals.completed}</strong>
-        </article>
-        <article className="stat">
-          <span>Cancelados</span>
-          <strong>{snapshot.totals.cancelled}</strong>
-        </article>
-        <article className="stat">
-          <span>Incidencias abiertas</span>
-          <strong>{snapshot.totals.openIncidents}</strong>
-        </article>
+        <StatCard label="En cola" value={snapshot.totals.requested} />
+        <StatCard label="Activos" value={snapshot.totals.active} />
+        <StatCard label="Completados" value={snapshot.totals.completed} />
+        <StatCard label="Cancelados" value={snapshot.totals.cancelled} />
+        <StatCard label="Incidencias abiertas" value={snapshot.totals.openIncidents} />
       </section>
 
       {error ? <section className="banner error">{error}</section> : null}
-      {loading ? <section className="banner">Cargando panel operativo...</section> : null}
+      {loading ? <section className="banner">Actualizando panel operativo...</section> : null}
 
       <section className="board">
-        <article className="panel">
-          <header className="panelHeader">
-            <h2>Solicitudes</h2>
-            <span>{snapshot.queueTrips.length}</span>
-          </header>
+        <Panel title="Solicitudes" count={snapshot.queueTrips.length}>
           {snapshot.queueTrips.length === 0 ? (
             <p className="empty">No hay solicitudes pendientes.</p>
           ) : (
@@ -119,13 +250,9 @@ export default function App() {
               <TripCard key={trip.id} trip={trip} accent="queue" />
             ))
           )}
-        </article>
+        </Panel>
 
-        <article className="panel">
-          <header className="panelHeader">
-            <h2>Activos</h2>
-            <span>{snapshot.activeTrips.length}</span>
-          </header>
+        <Panel title="Activos" count={snapshot.activeTrips.length}>
           {snapshot.activeTrips.length === 0 ? (
             <p className="empty">No hay viajes activos.</p>
           ) : (
@@ -133,13 +260,9 @@ export default function App() {
               <TripCard key={trip.id} trip={trip} accent="active" />
             ))
           )}
-        </article>
+        </Panel>
 
-        <article className="panel">
-          <header className="panelHeader">
-            <h2>Completados</h2>
-            <span>{snapshot.completedTrips.length}</span>
-          </header>
+        <Panel title="Completados" count={snapshot.completedTrips.length}>
           {snapshot.completedTrips.length === 0 ? (
             <p className="empty">Aun no hay viajes completados.</p>
           ) : (
@@ -147,13 +270,9 @@ export default function App() {
               <TripCard key={trip.id} trip={trip} accent="done" />
             ))
           )}
-        </article>
+        </Panel>
 
-        <article className="panel">
-          <header className="panelHeader">
-            <h2>Cancelados</h2>
-            <span>{snapshot.cancelledTrips.length}</span>
-          </header>
+        <Panel title="Cancelados" count={snapshot.cancelledTrips.length}>
           {snapshot.cancelledTrips.length === 0 ? (
             <p className="empty">No hay viajes cancelados.</p>
           ) : (
@@ -161,13 +280,9 @@ export default function App() {
               <TripCard key={trip.id} trip={trip} accent="done" />
             ))
           )}
-        </article>
+        </Panel>
 
-        <article className="panel">
-          <header className="panelHeader">
-            <h2>Incidencias</h2>
-            <span>{snapshot.incidents.length}</span>
-          </header>
+        <Panel title="Incidencias" count={snapshot.incidents.length}>
           {snapshot.incidents.length === 0 ? (
             <p className="empty">No hay incidencias registradas.</p>
           ) : (
@@ -180,12 +295,52 @@ export default function App() {
                 <p className="meta">Trip: {incident.tripId}</p>
                 <p className="meta">Reporta: {incident.reporterRole}</p>
                 <p className="route">{incident.notes}</p>
+                <div className="incidentActions">
+                  {(["reviewing", "resolved"] as const).map((status) => (
+                    <button
+                      key={status}
+                      className="secondaryAction"
+                      onClick={() => handleIncidentStatus(incident.id, status)}
+                    >
+                      {status}
+                    </button>
+                  ))}
+                </div>
               </section>
             ))
           )}
-        </article>
+        </Panel>
       </section>
     </main>
+  );
+}
+
+function StatCard({ label, value }: { label: string; value: number }) {
+  return (
+    <article className="stat">
+      <span>{label}</span>
+      <strong>{value}</strong>
+    </article>
+  );
+}
+
+function Panel({
+  title,
+  count,
+  children
+}: {
+  title: string;
+  count: number;
+  children: ReactNode;
+}) {
+  return (
+    <article className="panel">
+      <header className="panelHeader">
+        <h2>{title}</h2>
+        <span>{count}</span>
+      </header>
+      {children}
+    </article>
   );
 }
 
@@ -205,7 +360,7 @@ function TripCard({
       <p className="route">
         {trip.origin.label} {"->"} {trip.destination.label}
       </p>
-      <p className="meta">{formatMoney(trip)} · {trip.estimate.durationMinutes} min</p>
+      <p className="meta">{formatMoney(trip)} - {trip.estimate.durationMinutes} min</p>
       <p className="meta">Conductora: {trip.driverName ?? "Sin asignar"}</p>
       <p className="meta">Solicitado: {new Date(trip.requestedAt).toLocaleTimeString()}</p>
     </section>

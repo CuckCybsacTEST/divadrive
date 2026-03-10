@@ -6,6 +6,7 @@ import {
   type CreateIncidentPayload,
   DEFAULT_HOME_BOOTSTRAP,
   DRIVER_STATUS_FLOW,
+  type IncidentStatusUpdate,
   type OpsDashboardSnapshot,
   SERVICE_NAME,
   type ActiveTripStatus,
@@ -43,7 +44,7 @@ const persistIncidents = async () => {
 
 const signInSchema = z.object({
   phone: z.string().min(9),
-  role: z.enum(["passenger", "driver"])
+  role: z.enum(["passenger", "driver", "operator", "admin"])
 });
 
 const ridePointSchema = z.object({
@@ -75,6 +76,9 @@ const cancelTripSchema = z.object({
 const driverStatusSchema = z.object({
   status: z.enum(DRIVER_STATUS_FLOW)
 });
+const incidentStatusSchema = z.object({
+  status: z.enum(["open", "reviewing", "resolved"])
+});
 
 const requireSession = (authorizationHeader?: string) => {
   const token = authorizationHeader?.replace("Bearer ", "");
@@ -91,6 +95,17 @@ const requireRole = (
   role: AuthSession["user"]["role"]
 ) => {
   if (!session || session.user.role !== role) {
+    return null;
+  }
+
+  return session;
+};
+
+const requireAnyRole = (
+  session: AuthSession | null,
+  roles: AuthSession["user"]["role"][]
+) => {
+  if (!session || !roles.includes(session.user.role)) {
     return null;
   }
 
@@ -183,7 +198,13 @@ const createSession = (payload: z.infer<typeof signInSchema>): AuthSession => {
       id: `${payload.role}-${idSuffix}`,
       role: payload.role,
       fullName:
-        payload.role === "driver" ? "Conductora Demo" : "Pasajera Demo",
+        payload.role === "driver"
+          ? "Conductora Demo"
+          : payload.role === "operator"
+            ? "Operadora Demo"
+            : payload.role === "admin"
+              ? "Admin Demo"
+              : "Pasajera Demo",
       phone: payload.phone
     }
   };
@@ -281,11 +302,35 @@ app.get("/meta/trips", async () => {
   };
 });
 
-app.get("/ops/dashboard", async () => {
+app.get("/ops/dashboard", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
   return getOpsSnapshot();
 });
 
-app.get("/ops/trips", async () => {
+app.get("/ops/trips", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
   return {
     trips: Array.from(tripsById.values()).sort((a, b) =>
       b.requestedAt.localeCompare(a.requestedAt)
@@ -293,13 +338,69 @@ app.get("/ops/trips", async () => {
   };
 });
 
-app.get("/ops/incidents", async () => {
+app.get("/ops/incidents", async (request, reply) => {
+  const session = requireAnyRole(
+    requireSession(request.headers.authorization),
+    ["operator", "admin"]
+  );
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
   return {
     incidents: Array.from(incidentsById.values()).sort((a, b) =>
       b.createdAt.localeCompare(a.createdAt)
     )
   };
 });
+
+app.post<{ Params: { incidentId: string }; Body: IncidentStatusUpdate }>(
+  "/ops/incidents/:incidentId/status",
+  async (request, reply) => {
+    const session = requireAnyRole(
+      requireSession(request.headers.authorization),
+      ["operator", "admin"]
+    );
+
+    if (!session) {
+      reply.status(401);
+      return {
+        error: "invalid_session"
+      };
+    }
+
+    const parsedPayload = incidentStatusSchema.safeParse(request.body);
+
+    if (!parsedPayload.success) {
+      reply.status(400);
+      return {
+        error: "invalid_incident_status_payload"
+      };
+    }
+
+    const incident = incidentsById.get(request.params.incidentId);
+
+    if (!incident) {
+      reply.status(404);
+      return {
+        error: "incident_not_found"
+      };
+    }
+
+    const updatedIncident: TripIncident = {
+      ...incident,
+      status: parsedPayload.data.status
+    };
+
+    incidentsById.set(updatedIncident.id, updatedIncident);
+    await persistIncidents();
+    return updatedIncident;
+  }
+);
 
 app.post("/auth/sign-in", async (request, reply) => {
   const parsedPayload = signInSchema.safeParse(request.body);

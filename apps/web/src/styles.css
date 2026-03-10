@@ -27,6 +27,13 @@ body {
   margin-bottom: 28px;
 }
 
+.heroRow {
+  display: flex;
+  justify-content: space-between;
+  gap: 20px;
+  align-items: flex-start;
+}
+
 .eyebrow {
   margin: 0 0 10px;
   text-transform: uppercase;
@@ -90,6 +97,82 @@ body {
 
 .banner.error {
   color: #9c2c11;
+}
+
+.authPanel {
+  max-width: 460px;
+}
+
+.roleSwitch {
+  display: flex;
+  gap: 12px;
+  margin: 14px 0;
+}
+
+.roleBtn,
+.primaryAction,
+.secondaryAction {
+  border: 0;
+  border-radius: 14px;
+  font: inherit;
+  cursor: pointer;
+}
+
+.roleBtn {
+  flex: 1;
+  padding: 12px 14px;
+  background: #f4eadf;
+  color: #5a534d;
+}
+
+.roleBtn.active {
+  background: #c44e27;
+  color: #fffaf6;
+}
+
+.authInput {
+  width: 100%;
+  padding: 14px 16px;
+  border-radius: 14px;
+  border: 1px solid #e8d9cb;
+  margin-bottom: 12px;
+  font: inherit;
+}
+
+.primaryAction {
+  width: 100%;
+  padding: 14px 16px;
+  background: #c44e27;
+  color: #fffaf6;
+}
+
+.secondaryAction {
+  padding: 10px 12px;
+  background: #f4eadf;
+  color: #4d4741;
+}
+
+.sessionBox {
+  min-width: 210px;
+  padding: 18px;
+  border-radius: 22px;
+  background: rgba(255, 255, 255, 0.75);
+  border: 1px solid rgba(31, 29, 26, 0.08);
+}
+
+.sessionBox p {
+  margin: 0 0 8px;
+}
+
+.incidentActions {
+  display: flex;
+  gap: 10px;
+  margin-top: 12px;
+}
+
+.errorText {
+  color: #9c2c11;
+  margin-bottom: 0;
 }
 
 .board {
@@ -185,5 +268,9 @@ body {
 @media (max-width: 720px) {
   .shell {
     padding: 32px 14px 48px;
+  }
+
+  .heroRow {
+    flex-direction: column;
   }
 }
