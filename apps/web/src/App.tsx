@@ -40,7 +40,8 @@ const emptyBusiness: BusinessRulesSnapshot = {
     serviceFee: 0,
     surgeMultiplier: 1
   },
-  promotions: []
+  promotions: [],
+  auditLog: []
 };
 
 const formatMoney = (trip: RideTrip) =>
@@ -84,6 +85,8 @@ export default function App() {
     name: "",
     code: "",
     kind: "percentage",
+    audience: "new_passenger",
+    applyMode: "automatic",
     value: 10,
     minFare: 12,
     description: "",
@@ -280,6 +283,8 @@ export default function App() {
         name: "",
         code: "",
         kind: "percentage",
+        audience: "new_passenger",
+        applyMode: "automatic",
         value: 10,
         minFare: 12,
         description: "",
@@ -310,6 +315,8 @@ export default function App() {
           name: promotion.name,
           code: promotion.code,
           kind: promotion.kind,
+          audience: promotion.audience,
+          applyMode: promotion.applyMode,
           value: promotion.value,
           minFare: promotion.minFare,
           description: promotion.description,
@@ -626,6 +633,39 @@ export default function App() {
               </select>
             </label>
             <label>
+              <span>Audiencia</span>
+              <select
+                className="authInput"
+                value={promotionDraft.audience}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({
+                    ...current,
+                    audience: event.target.value as PromotionUpsertPayload["audience"]
+                  }))
+                }
+              >
+                <option value="all">Todas</option>
+                <option value="new_passenger">Nuevas pasajeras</option>
+                <option value="returning_passenger">Pasajeras recurrentes</option>
+              </select>
+            </label>
+            <label>
+              <span>Modo</span>
+              <select
+                className="authInput"
+                value={promotionDraft.applyMode}
+                onChange={(event) =>
+                  setPromotionDraft((current) => ({
+                    ...current,
+                    applyMode: event.target.value as PromotionUpsertPayload["applyMode"]
+                  }))
+                }
+              >
+                <option value="automatic">Automatica</option>
+                <option value="code">Por codigo</option>
+              </select>
+            </label>
+            <label>
               <span>Valor</span>
               <input
                 className="authInput"
@@ -696,7 +736,11 @@ export default function App() {
                   {promotion.kind === "percentage"
                     ? `${promotion.value}%`
                     : `${business.pricing.currency} ${promotion.value.toFixed(2)}`}
-                  {" · "}minimo {business.pricing.currency} {promotion.minFare.toFixed(2)}
+                  {" - "}minimo {business.pricing.currency} {promotion.minFare.toFixed(2)}
+                </p>
+                <p className="meta">
+                  {promotion.applyMode === "code" ? "Cupon manual" : "Autoaplica"} {" - "}
+                  {promotion.audience}
                 </p>
                 <p className="route">{promotion.description}</p>
                 <div className="incidentActions">
@@ -711,6 +755,26 @@ export default function App() {
               </section>
             ))}
           </div>
+        </Panel>
+
+        <Panel title="Auditoria comercial" count={business.auditLog.length}>
+          {business.auditLog.length === 0 ? (
+            <p className="empty">Aun no hay cambios comerciales registrados.</p>
+          ) : (
+            business.auditLog.map((entry) => (
+              <section key={entry.id} className="tripCard done">
+                <div className="tripRow">
+                  <strong>{entry.action}</strong>
+                  <span className="badge">{entry.actorRole}</span>
+                </div>
+                <p className="route">{entry.summary}</p>
+                <p className="meta">Actor: {entry.actorId}</p>
+                <p className="meta">
+                  {new Date(entry.occurredAt).toLocaleString()}
+                </p>
+              </section>
+            ))
+          )}
         </Panel>
       </section>
     </main>

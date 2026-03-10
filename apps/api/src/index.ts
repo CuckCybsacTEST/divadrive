@@ -4,6 +4,7 @@ import { z } from "zod";
 import {
   type BusinessRulesSnapshot,
   type AdminDirectorySnapshot,
+  type BusinessAuditEntry,
   DEFAULT_PRICING_CONFIG,
   DEFAULT_PROMOTIONS,
   type CancelTripPayload,
@@ -50,6 +51,7 @@ const driverProfilesById = new Map<string, DriverProfile>();
 const passengerProfilesById = new Map<string, PassengerProfile>();
 let pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG;
 const promotionsById = new Map<string, Promotion>();
+const businessAuditLog: BusinessAuditEntry[] = [];
 
 const persistTrips = async () => {
   await writeTrips(Array.from(tripsById.values()));
@@ -69,7 +71,8 @@ const persistUsers = async () => {
 const persistBusinessRules = async () => {
   await writeBusinessRules({
     pricing: pricingConfig,
-    promotions: Array.from(promotionsById.values())
+    promotions: Array.from(promotionsById.values()),
+    auditLog: businessAuditLog
   });
 };
 
@@ -87,7 +90,8 @@ const ridePointSchema = z.object({
 
 const rideEstimateSchema = z.object({
   origin: ridePointSchema,
-  destination: ridePointSchema
+  destination: ridePointSchema,
+  promoCode: z.string().min(2).optional()
 });
 
 const createTripSchema = rideEstimateSchema.extend({
@@ -126,6 +130,8 @@ const promotionSchema = z.object({
   name: z.string().min(2),
   code: z.string().min(2),
   kind: z.enum(["flat", "percentage"]),
+  audience: z.enum(["all", "new_passenger", "returning_passenger"]),
+  applyMode: z.enum(["automatic", "code"]),
   value: z.number().positive(),
   minFare: z.number().nonnegative(),
   description: z.string().min(4),
@@ -170,13 +176,50 @@ const getBusinessSnapshot = (): BusinessRulesSnapshot => ({
   pricing: pricingConfig,
   promotions: Array.from(promotionsById.values()).sort((a, b) =>
     b.createdAt.localeCompare(a.createdAt)
-  )
+  ),
+  auditLog: [...businessAuditLog].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
 });
 
-const buildAppliedPromotion = (fareBeforeDiscount: number) => {
-  const eligiblePromotions = Array.from(promotionsById.values()).filter(
-    (promotion) => promotion.isActive && fareBeforeDiscount >= promotion.minFare
-  );
+const appendBusinessAudit = (
+  session: AuthSession,
+  action: BusinessAuditEntry["action"],
+  summary: string
+) => {
+  businessAuditLog.unshift({
+    id: `biz-${Date.now()}-${businessAuditLog.length + 1}`,
+    actorId: session.user.id,
+    actorRole: session.user.role as BusinessAuditEntry["actorRole"],
+    action,
+    summary,
+    occurredAt: new Date().toISOString()
+  });
+};
+
+const isPassengerNew = (passengerId: string) =>
+  !Array.from(tripsById.values()).some((trip) => trip.passengerId === passengerId);
+
+const buildAppliedPromotion = (
+  fareBeforeDiscount: number,
+  passengerId: string,
+  requestedPromoCode?: string
+) => {
+  const normalizedCode = requestedPromoCode?.trim().toUpperCase();
+  const audience = isPassengerNew(passengerId) ? "new_passenger" : "returning_passenger";
+  const eligiblePromotions = Array.from(promotionsById.values()).filter((promotion) => {
+    if (!promotion.isActive || fareBeforeDiscount < promotion.minFare) {
+      return false;
+    }
+
+    if (promotion.audience !== "all" && promotion.audience !== audience) {
+      return false;
+    }
+
+    if (promotion.applyMode === "code") {
+      return normalizedCode === promotion.code;
+    }
+
+    return !normalizedCode || normalizedCode === promotion.code;
+  });
 
   if (eligiblePromotions.length === 0) {
     return null;
@@ -202,7 +245,10 @@ const buildAppliedPromotion = (fareBeforeDiscount: number) => {
   return candidates[0] ?? null;
 };
 
-const estimateRide = ({ origin, destination }: RideEstimateRequest): RideEstimate => {
+const estimateRide = (
+  { origin, destination, promoCode }: RideEstimateRequest,
+  passengerId: string
+): RideEstimate => {
   const earthRadiusKm = 6371;
   const deltaLatitude = toRadians(destination.latitude - origin.latitude);
   const deltaLongitude = toRadians(destination.longitude - origin.longitude);
@@ -233,7 +279,7 @@ const estimateRide = ({ origin, destination }: RideEstimateRequest): RideEstimat
   );
   const serviceFee = Number(pricingConfig.serviceFee.toFixed(2));
   const fareBeforeDiscount = Number((subtotal + serviceFee).toFixed(2));
-  const appliedPromotion = buildAppliedPromotion(fareBeforeDiscount);
+  const appliedPromotion = buildAppliedPromotion(fareBeforeDiscount, passengerId, promoCode);
   const discountAmount = Number((appliedPromotion?.discountAmount ?? 0).toFixed(2));
   const estimatedFare = Number(Math.max(fareBeforeDiscount - discountAmount, 0).toFixed(2));
 
@@ -648,6 +694,11 @@ app.post<{ Body: PricingConfigUpdate }>("/ops/pricing", async (request, reply) =
   }
 
   pricingConfig = parsedPayload.data;
+  appendBusinessAudit(
+    session,
+    "pricing_updated",
+    `Pricing actualizado a base ${parsedPayload.data.currency} ${parsedPayload.data.baseFare.toFixed(2)} y surge ${parsedPayload.data.surgeMultiplier.toFixed(1)}x`
+  );
   await persistBusinessRules();
   return getBusinessSnapshot();
 });
@@ -682,6 +733,11 @@ app.post<{ Body: PromotionUpsertPayload }>("/ops/promotions", async (request, re
   };
 
   promotionsById.set(promotion.id, promotion);
+  appendBusinessAudit(
+    session,
+    "promotion_created",
+    `Promocion ${promotion.code} creada para audiencia ${promotion.audience} en modo ${promotion.applyMode}`
+  );
   await persistBusinessRules();
   reply.status(201);
   return promotion;
@@ -727,6 +783,11 @@ app.post<{ Params: { promotionId: string }; Body: PromotionUpsertPayload }>(
     };
 
     promotionsById.set(updatedPromotion.id, updatedPromotion);
+    appendBusinessAudit(
+      session,
+      "promotion_updated",
+      `Promocion ${updatedPromotion.code} actualizada y ahora esta ${updatedPromotion.isActive ? "activa" : "pausada"}`
+    );
     await persistBusinessRules();
     return updatedPromotion;
   }
@@ -822,7 +883,7 @@ app.post("/trips/estimate", async (request, reply) => {
     };
   }
 
-  return estimateRide(parsedPayload.data);
+  return estimateRide(parsedPayload.data, session.user.id);
 });
 
 app.post("/trips", async (request, reply) => {
@@ -854,7 +915,7 @@ app.post("/trips", async (request, reply) => {
     };
   }
 
-  const estimate = estimateRide(parsedPayload.data);
+  const estimate = estimateRide(parsedPayload.data, session.user.id);
   const trip: RideTrip = {
     id: `trip-${Date.now()}`,
     passengerId: parsedPayload.data.passengerId,
@@ -862,6 +923,7 @@ app.post("/trips", async (request, reply) => {
     origin: parsedPayload.data.origin,
     destination: parsedPayload.data.destination,
     estimate,
+    requestedPromoCode: parsedPayload.data.promoCode?.trim().toUpperCase(),
     status: "requested",
     requestedAt: new Date().toISOString()
   };
@@ -1132,12 +1194,14 @@ const start = async () => {
   try {
     const persistedBusinessRules = await readBusinessRules().catch(() => ({
       pricing: DEFAULT_PRICING_CONFIG,
-      promotions: DEFAULT_PROMOTIONS
+      promotions: DEFAULT_PROMOTIONS,
+      auditLog: []
     }));
     pricingConfig = persistedBusinessRules.pricing;
     for (const promotion of persistedBusinessRules.promotions) {
       promotionsById.set(promotion.id, promotion);
     }
+    businessAuditLog.push(...(persistedBusinessRules.auditLog ?? []));
     const persistedTrips = await readTrips();
     for (const trip of persistedTrips) {
       tripsById.set(trip.id, trip);

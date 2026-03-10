@@ -115,6 +115,7 @@ export default function App() {
   const [origin, setOrigin] = useState<RidePoint | null>(null);
   const [passengerHome, setPassengerHome] = useState<HomeBootstrap | null>(null);
   const [destination, setDestination] = useState<RidePoint | null>(null);
+  const [promoCode, setPromoCode] = useState("");
   const [estimate, setEstimate] = useState<RideEstimate | null>(null);
   const [activeTrip, setActiveTrip] = useState<RideTrip | null>(null);
   const [driverQueue, setDriverQueue] = useState<RideTrip[]>([]);
@@ -280,7 +281,8 @@ export default function App() {
         method: "POST",
         body: JSON.stringify({
           origin,
-          destination
+          destination,
+          promoCode: promoCode.trim() || undefined
         } satisfies RideEstimateRequest)
       });
       setEstimate(nextEstimate);
@@ -302,7 +304,8 @@ export default function App() {
           passengerId: session.user.id,
           passengerName: session.user.fullName,
           origin,
-          destination
+          destination,
+          promoCode: promoCode.trim() || undefined
         })
       });
       setActiveTrip(trip);
@@ -498,6 +501,13 @@ export default function App() {
               </View>
               <View style={styles.card}>
                 <Text style={styles.heading}>Estimacion</Text>
+                <TextInput
+                  value={promoCode}
+                  onChangeText={setPromoCode}
+                  placeholder="Codigo promocional"
+                  autoCapitalize="characters"
+                  style={styles.input}
+                />
                 <Text style={styles.strong}>
                   {estimate ? `${estimate.currency} ${estimate.estimatedFare.toFixed(2)}` : "Pendiente"}
                 </Text>
@@ -518,6 +528,9 @@ export default function App() {
                     <Text style={styles.muted}>
                       Promo aplicada: {estimate.appliedPromotion?.code ?? "ninguna"}
                     </Text>
+                    {promoCode.trim() && !estimate.appliedPromotion ? (
+                      <Text style={styles.muted}>El codigo no aplico a este trayecto.</Text>
+                    ) : null}
                   </>
                 ) : null}
                 <Pressable onPress={handleEstimate} style={styles.altButton}>

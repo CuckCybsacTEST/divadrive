@@ -14,7 +14,8 @@ const businessFile = resolve(dataDir, "business.json");
 
 const defaultBusinessRules: BusinessRulesSnapshot = {
   pricing: DEFAULT_PRICING_CONFIG,
-  promotions: DEFAULT_PROMOTIONS
+  promotions: DEFAULT_PROMOTIONS,
+  auditLog: []
 };
 
 const ensureDataFile = async () => {

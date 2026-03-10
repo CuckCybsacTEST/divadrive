@@ -44,6 +44,8 @@ export type IncidentSeverity = "low" | "medium" | "high";
 export type IncidentStatus = "open" | "reviewing" | "resolved";
 export type IncidentReporterRole = "passenger" | "driver" | "operator";
 export type PromotionKind = "flat" | "percentage";
+export type PromotionAudience = "all" | "new_passenger" | "returning_passenger";
+export type PromotionApplyMode = "automatic" | "code";
 
 export interface TripIncident {
   id: string;
@@ -130,6 +132,7 @@ export interface HomeBootstrap {
 export interface RideEstimateRequest {
   origin: RidePoint;
   destination: RidePoint;
+  promoCode?: string;
 }
 
 export interface RideEstimate {
@@ -163,6 +166,8 @@ export interface Promotion {
   name: string;
   code: string;
   kind: PromotionKind;
+  audience: PromotionAudience;
+  applyMode: PromotionApplyMode;
   value: number;
   minFare: number;
   description: string;
@@ -204,6 +209,7 @@ export interface RideTrip {
   cancellationReason?: string;
   cancelledByRole?: IncidentReporterRole;
   cancelledAt?: string;
+  requestedPromoCode?: string;
 }
 
 export interface CreateTripRequest extends RideEstimateRequest {
@@ -235,6 +241,16 @@ export interface OpsDashboardSnapshot {
 export interface BusinessRulesSnapshot {
   pricing: PricingConfig;
   promotions: Promotion[];
+  auditLog: BusinessAuditEntry[];
+}
+
+export interface BusinessAuditEntry {
+  id: string;
+  actorId: string;
+  actorRole: Extract<UserRole, "operator" | "admin">;
+  action: "pricing_updated" | "promotion_created" | "promotion_updated";
+  summary: string;
+  occurredAt: string;
 }
 
 export interface AdminDirectorySnapshot {
@@ -260,6 +276,8 @@ export interface PromotionUpsertPayload {
   name: string;
   code: string;
   kind: PromotionKind;
+  audience: PromotionAudience;
+  applyMode: PromotionApplyMode;
   value: number;
   minFare: number;
   description: string;
@@ -311,6 +329,8 @@ export const DEFAULT_PROMOTIONS: Promotion[] = [
     name: "Bienvenida DIVA",
     code: "DIVA10",
     kind: "percentage",
+    audience: "new_passenger",
+    applyMode: "automatic",
     value: 10,
     minFare: 12,
     description: "Descuento inicial para activar primeras solicitudes.",
@@ -322,6 +342,8 @@ export const DEFAULT_PROMOTIONS: Promotion[] = [
     name: "Trayecto seguro",
     code: "SAFE5",
     kind: "flat",
+    audience: "all",
+    applyMode: "code",
     value: 5,
     minFare: 20,
     description: "Incentivo fijo para recorridos de mayor valor.",

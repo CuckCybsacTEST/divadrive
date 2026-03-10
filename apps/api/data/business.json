@@ -14,6 +14,8 @@
       "name": "Bienvenida DIVA",
       "code": "DIVA10",
       "kind": "percentage",
+      "audience": "new_passenger",
+      "applyMode": "automatic",
       "value": 10,
       "minFare": 12,
       "description": "Descuento inicial para activar primeras solicitudes.",
@@ -25,11 +27,14 @@
       "name": "Trayecto seguro",
       "code": "SAFE5",
       "kind": "flat",
+      "audience": "all",
+      "applyMode": "code",
       "value": 5,
       "minFare": 20,
       "description": "Incentivo fijo para recorridos de mayor valor.",
       "isActive": false,
       "createdAt": "2026-03-10T00:00:00.000Z"
     }
-  ]
+  ],
+  "auditLog": []
 }
