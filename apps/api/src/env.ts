@@ -1,7 +1,13 @@
 import { config } from "dotenv";
+import { dirname, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import { z } from "zod";
 
-config();
+const currentFile = fileURLToPath(import.meta.url);
+const currentDir = dirname(currentFile);
+const repoRootEnvFile = resolve(currentDir, "../../../.env");
+
+config({ path: repoRootEnvFile });
 
 const envSchema = z.object({
   SUPABASE_URL: z.string().url().optional(),

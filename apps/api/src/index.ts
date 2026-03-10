@@ -42,6 +42,7 @@ import { readBusinessRules, writeBusinessRules } from "./business-store.js";
 import { appEnv } from "./env.js";
 import { readEvents, writeEvents } from "./event-store.js";
 import { readIncidents, writeIncidents } from "./incident-store.js";
+import { syncLocalDataToSupabase } from "./supabase-bootstrap.js";
 import { readTrips, writeTrips } from "./trip-store.js";
 import { readUsers, writeUsers } from "./user-store.js";
 
@@ -649,7 +650,8 @@ app.get("/health", async () => {
   return {
     service: SERVICE_NAME,
     status: "ok",
-    supabaseEnabled: appEnv.supabaseEnabled
+    supabaseEnabled: appEnv.supabaseEnabled,
+    persistence: appEnv.supabaseEnabled ? "supabase" : "local_json"
   };
 });
 
@@ -1558,6 +1560,7 @@ app.post<{ Params: { tripId: string }; Body: DriverTripStatusUpdate }>(
 
 const start = async () => {
   try {
+    await syncLocalDataToSupabase();
     const persistedBusinessRules = await readBusinessRules().catch(() => ({
       pricing: DEFAULT_PRICING_CONFIG,
       promotions: DEFAULT_PROMOTIONS,
