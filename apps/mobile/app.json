@@ -1,0 +1,12 @@
+{
+  "expo": {
+    "name": "DIVA DRIVE",
+    "slug": "diva-drive",
+    "scheme": "divadrive",
+    "version": "0.1.0",
+    "orientation": "portrait",
+    "platforms": ["android"],
+    "assetBundlePatterns": ["**/*"]
+  }
+}
+

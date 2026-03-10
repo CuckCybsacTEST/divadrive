@@ -1,0 +1,16 @@
+{
+  "name": "@diva-drive/mobile",
+  "version": "0.1.0",
+  "private": true,
+  "main": "expo/AppEntry",
+  "scripts": {
+    "dev": "expo start",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "@diva-drive/domain": "0.1.0",
+    "expo": "55.0.5",
+    "react": "19.2.4",
+    "react-native": "0.84.1"
+  }
+}

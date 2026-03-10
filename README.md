@@ -5,6 +5,21 @@ Repositorio base de DIVA DRIVE, una plataforma de movilidad urbana con foco en s
 ## Estado actual
 Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base documental, cerrar decisiones de arquitectura y preparar la estructura para desarrollo incremental.
 
+## Estructura tecnica inicial
+- `apps/api`: backend operacional con Fastify y TypeScript
+- `apps/web`: panel web base con React y Vite
+- `apps/mobile`: app movil Android-first con Expo y React Native
+- `packages/domain`: contratos y tipos compartidos del dominio
+
+## Comandos base
+- `npm install`
+- `npm run dev:api`
+- `npm run dev:web`
+- `npm run dev:mobile`
+- `npm run lint`
+- `npm run typecheck`
+- `npm run build`
+
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
 - `VISION_AND_SCOPE.md`
@@ -27,4 +42,4 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Cerrar ADRs iniciales del stack y crear la estructura tecnica del monorepo respetando los contratos definidos en estos documentos.
+Implementar el primer slice vertical del producto: autenticacion base, home movil con mapa y el esqueleto de viajes apoyado en `packages/domain`.

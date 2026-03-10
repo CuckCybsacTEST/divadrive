@@ -1,0 +1,27 @@
+{
+  "name": "diva-drive",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "npm@11.6.1",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "build": "npm run build --workspace @diva-drive/domain && npm run build --workspace @diva-drive/api && npm run build --workspace @diva-drive/web",
+    "dev:api": "npm run build --workspace @diva-drive/domain && npm run dev --workspace @diva-drive/api",
+    "dev:mobile": "npm run build --workspace @diva-drive/domain && npm run dev --workspace @diva-drive/mobile",
+    "dev:web": "npm run build --workspace @diva-drive/domain && npm run dev --workspace @diva-drive/web",
+    "lint": "eslint .",
+    "typecheck": "npm run typecheck --workspace @diva-drive/domain && npm run typecheck --workspace @diva-drive/api && npm run typecheck --workspace @diva-drive/web && npm run typecheck --workspace @diva-drive/mobile"
+  },
+  "devDependencies": {
+    "@eslint/js": "10.0.1",
+    "@types/node": "25.4.0",
+    "eslint": "10.0.3",
+    "globals": "16.4.0",
+    "tsx": "4.20.6",
+    "typescript": "5.9.3",
+    "typescript-eslint": "8.57.0"
+  }
+}
