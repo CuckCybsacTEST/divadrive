@@ -18,6 +18,8 @@ import {
   DRIVER_STATUS_FLOW,
   SERVICE_NAME,
   type AuthSession,
+  type CreateIncidentPayload,
+  type CancelTripPayload,
   type DriverQueueSummary,
   type DriverTripStatusUpdate,
   type HomeBootstrap,
@@ -84,6 +86,23 @@ const regionFromPoints = (origin: RidePoint, destination: RidePoint): MapRegion 
   latitudeDelta: Math.max(Math.abs(origin.latitude - destination.latitude), 0.02) * 2.2,
   longitudeDelta:
     Math.max(Math.abs(origin.longitude - destination.longitude), 0.02) * 2.2
+});
+
+const reportIncident = async (
+  session: AuthSession,
+  payload: CreateIncidentPayload
+) => api("/incidents", session, {
+  method: "POST",
+  body: JSON.stringify(payload)
+});
+
+const cancelTrip = async (
+  session: AuthSession,
+  tripId: string,
+  payload: CancelTripPayload
+) => api<RideTrip>(`/trips/${tripId}/cancel`, session, {
+  method: "POST",
+  body: JSON.stringify(payload)
 });
 
 export default function App() {
@@ -330,6 +349,47 @@ export default function App() {
     }
   };
 
+  const handleReportIncident = async () => {
+    if (!session || !activeTrip) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await reportIncident(session, {
+        tripId: activeTrip.id,
+        severity: "medium",
+        category: "operacion",
+        notes:
+          session.user.role === "driver"
+            ? "Incidencia reportada desde la app de conductora."
+            : "Incidencia reportada desde la app de pasajera."
+      });
+      Alert.alert("Incidencia registrada", "Ya quedó visible en el panel operativo.");
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleCancelTrip = async () => {
+    if (!session || !activeTrip) {
+      return;
+    }
+
+    setLoading(true);
+    try {
+      await cancelTrip(session, activeTrip.id, {
+        reason:
+          session.user.role === "driver"
+            ? "Cancelacion operativa desde conductora"
+            : "Cancelacion solicitada por pasajera"
+      });
+      setActiveTrip(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
   if (!session) {
     return (
       <SafeAreaView style={styles.safe}>
@@ -448,6 +508,16 @@ export default function App() {
                     ? `Conductora: ${activeTrip.driverName}`
                     : "Esperando asignacion"}
                 </Text>
+                {activeTrip ? (
+                  <>
+                    <Pressable onPress={handleReportIncident} style={styles.altButton}>
+                      <Text style={styles.altButtonText}>Reportar incidencia</Text>
+                    </Pressable>
+                    <Pressable onPress={handleCancelTrip} style={styles.ghostButton}>
+                      <Text style={styles.ghostButtonText}>Cancelar viaje</Text>
+                    </Pressable>
+                  </>
+                ) : null}
               </View>
             </>
           ) : (
@@ -481,6 +551,12 @@ export default function App() {
                           ? `Marcar ${nextStatusForTrip(activeTrip)}`
                           : "Viaje completado"}
                       </Text>
+                    </Pressable>
+                    <Pressable onPress={handleReportIncident} style={styles.altButton}>
+                      <Text style={styles.altButtonText}>Reportar incidencia</Text>
+                    </Pressable>
+                    <Pressable onPress={handleCancelTrip} style={styles.ghostButton}>
+                      <Text style={styles.ghostButtonText}>Cancelar viaje</Text>
                     </Pressable>
                   </View>
                 </>
@@ -535,8 +611,10 @@ const styles = StyleSheet.create({
   input: { borderWidth: 1, borderColor: "#e3d8ce", borderRadius: 14, paddingHorizontal: 16, paddingVertical: 14, backgroundColor: "#fff" },
   button: { marginTop: 12, minHeight: 50, borderRadius: 14, backgroundColor: "#c54b23", alignItems: "center", justifyContent: "center" },
   altButton: { marginTop: 12, minHeight: 50, borderRadius: 14, borderWidth: 1, borderColor: "#c54b23", alignItems: "center", justifyContent: "center" },
+  ghostButton: { marginTop: 12, minHeight: 48, borderRadius: 14, borderWidth: 1, borderColor: "#d3b7aa", alignItems: "center", justifyContent: "center", backgroundColor: "#fff7f3" },
   buttonText: { color: "#fffaf6", fontWeight: "800", fontSize: 16 },
   altButtonText: { color: "#c54b23", fontWeight: "800", fontSize: 15 },
+  ghostButtonText: { color: "#8d3e25", fontWeight: "800", fontSize: 15 },
   kicker: { color: "#c54b23", fontSize: 12, fontWeight: "700", letterSpacing: 2, textTransform: "uppercase" },
   title: { marginTop: 8, color: "#1d1c1a", fontSize: 42, fontWeight: "800" },
   copy: { marginTop: 12, color: "#4d4741", fontSize: 18, lineHeight: 26 },

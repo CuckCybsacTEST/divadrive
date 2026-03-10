@@ -11,10 +11,14 @@ const emptySnapshot: OpsDashboardSnapshot = {
   queueTrips: [],
   activeTrips: [],
   completedTrips: [],
+  cancelledTrips: [],
+  incidents: [],
   totals: {
     requested: 0,
     active: 0,
-    completed: 0
+    completed: 0,
+    cancelled: 0,
+    openIncidents: 0
   }
 };
 
@@ -89,6 +93,14 @@ export default function App() {
           <span>Completados</span>
           <strong>{snapshot.totals.completed}</strong>
         </article>
+        <article className="stat">
+          <span>Cancelados</span>
+          <strong>{snapshot.totals.cancelled}</strong>
+        </article>
+        <article className="stat">
+          <span>Incidencias abiertas</span>
+          <strong>{snapshot.totals.openIncidents}</strong>
+        </article>
       </section>
 
       {error ? <section className="banner error">{error}</section> : null}
@@ -133,6 +145,42 @@ export default function App() {
           ) : (
             snapshot.completedTrips.map((trip) => (
               <TripCard key={trip.id} trip={trip} accent="done" />
+            ))
+          )}
+        </article>
+
+        <article className="panel">
+          <header className="panelHeader">
+            <h2>Cancelados</h2>
+            <span>{snapshot.cancelledTrips.length}</span>
+          </header>
+          {snapshot.cancelledTrips.length === 0 ? (
+            <p className="empty">No hay viajes cancelados.</p>
+          ) : (
+            snapshot.cancelledTrips.map((trip) => (
+              <TripCard key={trip.id} trip={trip} accent="done" />
+            ))
+          )}
+        </article>
+
+        <article className="panel">
+          <header className="panelHeader">
+            <h2>Incidencias</h2>
+            <span>{snapshot.incidents.length}</span>
+          </header>
+          {snapshot.incidents.length === 0 ? (
+            <p className="empty">No hay incidencias registradas.</p>
+          ) : (
+            snapshot.incidents.map((incident) => (
+              <section key={incident.id} className="tripCard queue">
+                <div className="tripRow">
+                  <strong>{incident.category}</strong>
+                  <span className="badge">{incident.severity}</span>
+                </div>
+                <p className="meta">Trip: {incident.tripId}</p>
+                <p className="meta">Reporta: {incident.reporterRole}</p>
+                <p className="route">{incident.notes}</p>
+              </section>
             ))
           )}
         </article>

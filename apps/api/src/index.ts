@@ -2,6 +2,8 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { z } from "zod";
 import {
+  type CancelTripPayload,
+  type CreateIncidentPayload,
   DEFAULT_HOME_BOOTSTRAP,
   DRIVER_STATUS_FLOW,
   type OpsDashboardSnapshot,
@@ -12,9 +14,11 @@ import {
   type RideEstimate,
   type RideEstimateRequest,
   type RideTrip,
+  type TripIncident,
   TRIP_EVENT_TYPES,
   TRIP_STATUSES
 } from "@diva-drive/domain";
+import { readIncidents, writeIncidents } from "./incident-store.js";
 import { readTrips, writeTrips } from "./trip-store.js";
 
 const app = Fastify({
@@ -27,9 +31,14 @@ await app.register(cors, {
 
 const sessions = new Map<string, AuthSession>();
 const tripsById = new Map<string, RideTrip>();
+const incidentsById = new Map<string, TripIncident>();
 
 const persistTrips = async () => {
   await writeTrips(Array.from(tripsById.values()));
+};
+
+const persistIncidents = async () => {
+  await writeIncidents(Array.from(incidentsById.values()));
 };
 
 const signInSchema = z.object({
@@ -52,6 +61,15 @@ const rideEstimateSchema = z.object({
 const createTripSchema = rideEstimateSchema.extend({
   passengerId: z.string().min(1),
   passengerName: z.string().min(1)
+});
+const incidentSchema = z.object({
+  tripId: z.string().min(1),
+  severity: z.enum(["low", "medium", "high"]),
+  category: z.string().min(2),
+  notes: z.string().min(4)
+});
+const cancelTripSchema = z.object({
+  reason: z.string().min(3)
 });
 
 const driverStatusSchema = z.object({
@@ -178,7 +196,8 @@ const getPassengerActiveTrip = (passengerId: string) => {
   const trips = Array.from(tripsById.values()).filter(
     (trip) =>
       trip.passengerId === passengerId &&
-      trip.status !== "trip_completed"
+      trip.status !== "trip_completed" &&
+      trip.status !== "cancelled"
   );
 
   return trips.at(-1) ?? null;
@@ -188,7 +207,9 @@ const getDriverActiveTrip = (driverId: string) => {
   return (
     Array.from(tripsById.values()).find(
       (trip) =>
-        trip.driverId === driverId && trip.status !== "trip_completed"
+        trip.driverId === driverId &&
+        trip.status !== "trip_completed" &&
+        trip.status !== "cancelled"
     ) ?? null
   );
 };
@@ -219,18 +240,29 @@ const getOpsSnapshot = (): OpsDashboardSnapshot => {
   );
   const queueTrips = allTrips.filter((trip) => trip.status === "requested");
   const completedTrips = allTrips.filter((trip) => trip.status === "trip_completed");
+  const cancelledTrips = allTrips.filter((trip) => trip.status === "cancelled");
   const activeTrips = allTrips.filter(
-    (trip) => trip.status !== "requested" && trip.status !== "trip_completed"
+    (trip) =>
+      trip.status !== "requested" &&
+      trip.status !== "trip_completed" &&
+      trip.status !== "cancelled"
+  );
+  const incidents = Array.from(incidentsById.values()).sort((a, b) =>
+    b.createdAt.localeCompare(a.createdAt)
   );
 
   return {
     queueTrips,
     activeTrips,
     completedTrips,
+    cancelledTrips,
+    incidents,
     totals: {
       requested: queueTrips.length,
       active: activeTrips.length,
-      completed: completedTrips.length
+      completed: completedTrips.length,
+      cancelled: cancelledTrips.length,
+      openIncidents: incidents.filter((incident) => incident.status !== "resolved").length
     }
   };
 };
@@ -257,6 +289,14 @@ app.get("/ops/trips", async () => {
   return {
     trips: Array.from(tripsById.values()).sort((a, b) =>
       b.requestedAt.localeCompare(a.requestedAt)
+    )
+  };
+});
+
+app.get("/ops/incidents", async () => {
+  return {
+    incidents: Array.from(incidentsById.values()).sort((a, b) =>
+      b.createdAt.localeCompare(a.createdAt)
     )
   };
 });
@@ -416,6 +456,110 @@ app.get("/trips/active", async (request, reply) => {
   };
 });
 
+app.post<{ Body: CreateIncidentPayload }>("/incidents", async (request, reply) => {
+  const session = requireSession(request.headers.authorization);
+
+  if (!session) {
+    reply.status(401);
+    return {
+      error: "invalid_session"
+    };
+  }
+
+  const parsedPayload = incidentSchema.safeParse(request.body);
+
+  if (!parsedPayload.success) {
+    reply.status(400);
+    return {
+      error: "invalid_incident_payload"
+    };
+  }
+
+  const trip = tripsById.get(parsedPayload.data.tripId);
+
+  if (!trip) {
+    reply.status(404);
+    return {
+      error: "trip_not_found"
+    };
+  }
+
+  const incident: TripIncident = {
+    id: `incident-${Date.now()}`,
+    tripId: trip.id,
+    reporterRole:
+      session.user.role === "driver" ? "driver" : "passenger",
+    reporterId: session.user.id,
+    severity: parsedPayload.data.severity,
+    category: parsedPayload.data.category,
+    notes: parsedPayload.data.notes,
+    createdAt: new Date().toISOString(),
+    status: "open"
+  };
+
+  incidentsById.set(incident.id, incident);
+  await persistIncidents();
+  reply.status(201);
+  return incident;
+});
+
+app.post<{ Params: { tripId: string }; Body: CancelTripPayload }>(
+  "/trips/:tripId/cancel",
+  async (request, reply) => {
+    const session = requireSession(request.headers.authorization);
+
+    if (!session) {
+      reply.status(401);
+      return {
+        error: "invalid_session"
+      };
+    }
+
+    const parsedPayload = cancelTripSchema.safeParse(request.body);
+
+    if (!parsedPayload.success) {
+      reply.status(400);
+      return {
+        error: "invalid_cancel_payload"
+      };
+    }
+
+    const trip = tripsById.get(request.params.tripId);
+
+    if (!trip) {
+      reply.status(404);
+      return {
+        error: "trip_not_found"
+      };
+    }
+
+    const sessionCanCancel =
+      session.user.role === "passenger"
+        ? trip.passengerId === session.user.id
+        : trip.driverId === session.user.id;
+
+    if (!sessionCanCancel) {
+      reply.status(403);
+      return {
+        error: "trip_cancel_not_allowed"
+      };
+    }
+
+    const cancelledTrip = patchTrip(trip.id, {
+      status: "cancelled",
+      cancellationReason: parsedPayload.data.reason,
+      cancelledByRole:
+        session.user.role === "driver" ? "driver" : "passenger",
+      cancelledAt: new Date().toISOString(),
+      driverEtaMinutes: undefined,
+      currentDriverLocation: undefined
+    });
+
+    await persistTrips();
+    return cancelledTrip;
+  }
+);
+
 app.get("/driver/trips/queue", async (request, reply) => {
   const session = requireRole(
     requireSession(request.headers.authorization),
@@ -546,6 +690,10 @@ const start = async () => {
     const persistedTrips = await readTrips();
     for (const trip of persistedTrips) {
       tripsById.set(trip.id, trip);
+    }
+    const persistedIncidents = await readIncidents();
+    for (const incident of persistedIncidents) {
+      incidentsById.set(incident.id, incident);
     }
     await app.listen({
       host: "0.0.0.0",

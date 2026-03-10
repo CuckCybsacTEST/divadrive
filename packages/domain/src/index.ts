@@ -40,6 +40,22 @@ export interface AuditEvent {
   actorId?: string;
 }
 
+export type IncidentSeverity = "low" | "medium" | "high";
+export type IncidentStatus = "open" | "reviewing" | "resolved";
+export type IncidentReporterRole = "passenger" | "driver" | "operator";
+
+export interface TripIncident {
+  id: string;
+  tripId: string;
+  reporterRole: IncidentReporterRole;
+  reporterId: string;
+  severity: IncidentSeverity;
+  category: string;
+  notes: string;
+  createdAt: string;
+  status: IncidentStatus;
+}
+
 export interface SessionUser {
   id: string;
   role: UserRole;
@@ -108,6 +124,7 @@ export type ActiveTripStatus = Extract<
   | "driver_arrived"
   | "trip_started"
   | "trip_completed"
+  | "cancelled"
 >;
 
 export interface RideTrip {
@@ -123,6 +140,9 @@ export interface RideTrip {
   driverName?: string;
   driverEtaMinutes?: number;
   currentDriverLocation?: Coordinates;
+  cancellationReason?: string;
+  cancelledByRole?: IncidentReporterRole;
+  cancelledAt?: string;
 }
 
 export interface CreateTripRequest extends RideEstimateRequest {
@@ -139,11 +159,26 @@ export interface OpsDashboardSnapshot {
   queueTrips: RideTrip[];
   activeTrips: RideTrip[];
   completedTrips: RideTrip[];
+  cancelledTrips: RideTrip[];
+  incidents: TripIncident[];
   totals: {
     requested: number;
     active: number;
     completed: number;
+    cancelled: number;
+    openIncidents: number;
   };
+}
+
+export interface CreateIncidentPayload {
+  tripId: string;
+  severity: IncidentSeverity;
+  category: string;
+  notes: string;
+}
+
+export interface CancelTripPayload {
+  reason: string;
 }
 
 export interface DriverTripStatusUpdate {
