@@ -74,6 +74,7 @@ export interface SessionUser {
   role: UserRole;
   fullName: string;
   phone: string;
+  email: string;
 }
 
 export type DriverApprovalStatus = "pending" | "approved" | "rejected";
@@ -100,10 +101,51 @@ export interface PassengerProfile {
 
 export interface AuthSession {
   accessToken: string;
+  refreshToken: string;
+  expiresAt: string | null;
   user: SessionUser;
 }
 
+export const REALTIME_EVENT_TYPES = [
+  "session.ready",
+  "ops.snapshot.refresh",
+  "ops.events.refresh",
+  "ops.directory.refresh",
+  "business.refresh",
+  "commercial.refresh",
+  "trip.queue.refresh",
+  "trip.active.refresh",
+  "trip.history.refresh",
+  "trip.timeline.refresh",
+  "notifications.refresh",
+  "driver.profile.refresh"
+] as const;
+
+export type RealtimeEventType = (typeof REALTIME_EVENT_TYPES)[number];
+
+export interface RealtimeEnvelope {
+  id: string;
+  type: RealtimeEventType;
+  occurredAt: string;
+  tripId?: string;
+  reason?: string;
+  trip?: RideTrip;
+  timelineEvent?: TripTimelineEvent;
+  notification?: OperationalNotification;
+  driverProfile?: DriverProfile;
+  passengerProfile?: PassengerProfile;
+  pricing?: PricingConfig;
+  promotion?: Promotion;
+  auditEntry?: BusinessAuditEntry;
+}
+
 export interface SignInPayload {
+  email: string;
+  password: string;
+}
+
+export interface SignUpPayload extends SignInPayload {
+  fullName: string;
   phone: string;
   role: UserRole;
 }

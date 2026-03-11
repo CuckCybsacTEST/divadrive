@@ -1,5 +1,21 @@
 create extension if not exists "pgcrypto";
 
+create or replace function public.current_app_role()
+returns text
+language sql
+stable
+as $$
+  select coalesce(auth.jwt() -> 'app_metadata' ->> 'role', auth.jwt() -> 'user_metadata' ->> 'role', '');
+$$;
+
+create or replace function public.is_ops_role()
+returns boolean
+language sql
+stable
+as $$
+  select public.current_app_role() in ('operator', 'admin');
+$$;
+
 create table if not exists passenger_profiles (
   id text primary key,
   full_name text not null,
@@ -120,3 +136,102 @@ alter table api_sessions enable row level security;
 alter table business_config enable row level security;
 alter table promotions enable row level security;
 alter table business_audit_log enable row level security;
+
+drop policy if exists passenger_profiles_self_read on passenger_profiles;
+create policy passenger_profiles_self_read
+on passenger_profiles
+for select
+to authenticated
+using (id = auth.uid()::text or public.is_ops_role());
+
+drop policy if exists driver_profiles_role_read on driver_profiles;
+create policy driver_profiles_role_read
+on driver_profiles
+for select
+to authenticated
+using (id = auth.uid()::text or public.is_ops_role());
+
+drop policy if exists trips_role_read on trips;
+create policy trips_role_read
+on trips
+for select
+to authenticated
+using (
+  passenger_id = auth.uid()::text
+  or driver_id = auth.uid()::text
+  or public.is_ops_role()
+);
+
+drop policy if exists trip_incidents_role_read on trip_incidents;
+create policy trip_incidents_role_read
+on trip_incidents
+for select
+to authenticated
+using (
+  reporter_id = auth.uid()::text
+  or exists (
+    select 1
+    from trips
+    where trips.id = trip_incidents.trip_id
+      and (
+        trips.passenger_id = auth.uid()::text
+        or trips.driver_id = auth.uid()::text
+        or public.is_ops_role()
+      )
+  )
+);
+
+drop policy if exists trip_events_role_read on trip_events;
+create policy trip_events_role_read
+on trip_events
+for select
+to authenticated
+using (
+  exists (
+    select 1
+    from trips
+    where trips.id = trip_events.trip_id
+      and (
+        trips.passenger_id = auth.uid()::text
+        or trips.driver_id = auth.uid()::text
+        or public.is_ops_role()
+      )
+  )
+);
+
+drop policy if exists business_config_ops_read on business_config;
+create policy business_config_ops_read
+on business_config
+for select
+to authenticated
+using (public.is_ops_role());
+
+drop policy if exists promotions_ops_read on promotions;
+create policy promotions_ops_read
+on promotions
+for select
+to authenticated
+using (public.is_ops_role());
+
+drop policy if exists business_audit_log_ops_read on business_audit_log;
+create policy business_audit_log_ops_read
+on business_audit_log
+for select
+to authenticated
+using (public.is_ops_role());
+
+drop policy if exists api_sessions_no_client_access on api_sessions;
+create policy api_sessions_no_client_access
+on api_sessions
+for select
+to authenticated
+using (false);
+
+alter publication supabase_realtime add table passenger_profiles;
+alter publication supabase_realtime add table driver_profiles;
+alter publication supabase_realtime add table trips;
+alter publication supabase_realtime add table trip_incidents;
+alter publication supabase_realtime add table trip_events;
+alter publication supabase_realtime add table business_config;
+alter publication supabase_realtime add table promotions;
+alter publication supabase_realtime add table business_audit_log;

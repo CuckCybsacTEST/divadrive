@@ -1,8 +1,9 @@
-import { type ReactNode, useEffect, useState } from "react";
+import { type ReactNode, useEffect, useRef, useState } from "react";
 import {
   type BusinessRulesSnapshot,
   type AdminDirectorySnapshot,
   type CommercialMetricsSnapshot,
+  type RealtimeEnvelope,
   SERVICE_NAME,
   type AuthSession,
   type DriverApprovalStatus,
@@ -15,7 +16,20 @@ import {
 } from "@diva-drive/domain";
 
 const API_BASE_URL = "http://127.0.0.1:4000";
+const WS_BASE_URL = "ws://127.0.0.1:4000/ws";
 const STORAGE_KEY = "diva-drive-ops-session";
+
+type AuthMode = "sign_in" | "sign_up";
+type WebRole = "operator" | "admin";
+type RealtimePayload = RealtimeEnvelope & {
+  trip?: RideTrip;
+  timelineEvent?: TripTimelineEvent;
+  driverProfile?: AdminDirectorySnapshot["drivers"][number];
+  passengerProfile?: AdminDirectorySnapshot["passengers"][number];
+  pricing?: PricingConfig;
+  promotion?: BusinessRulesSnapshot["promotions"][number];
+  auditEntry?: BusinessRulesSnapshot["auditLog"][number];
+};
 
 const emptySnapshot: OpsDashboardSnapshot = {
   queueTrips: [],
@@ -60,30 +74,80 @@ const emptyEventStream: TripTimelineEvent[] = [];
 const formatMoney = (trip: RideTrip) =>
   `${trip.estimate.currency} ${trip.estimate.estimatedFare.toFixed(2)}`;
 
-const authorizedFetch = async <T,>(
-  session: AuthSession,
-  path: string,
-  options?: RequestInit
-) => {
-  const response = await fetch(`${API_BASE_URL}${path}`, {
-    ...options,
-    headers: {
-      "Content-Type": "application/json",
-      Authorization: `Bearer ${session.accessToken}`,
-      ...(options?.headers ?? {})
-    }
-  });
+const sortTrips = (trips: RideTrip[]) =>
+  [...trips].sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
 
-  if (!response.ok) {
-    throw new Error(path);
+const upsertTrip = (trips: RideTrip[], trip: RideTrip) =>
+  sortTrips([trip, ...trips.filter((item) => item.id !== trip.id)]);
+
+const patchSnapshotWithTrip = (
+  current: OpsDashboardSnapshot,
+  trip: RideTrip
+): OpsDashboardSnapshot => {
+  const queueTrips = trip.status === "requested"
+    ? upsertTrip(current.queueTrips, trip)
+    : current.queueTrips.filter((item) => item.id !== trip.id);
+  const completedTrips = trip.status === "trip_completed"
+    ? upsertTrip(current.completedTrips, trip)
+    : current.completedTrips.filter((item) => item.id !== trip.id);
+  const cancelledTrips = trip.status === "cancelled"
+    ? upsertTrip(current.cancelledTrips, trip)
+    : current.cancelledTrips.filter((item) => item.id !== trip.id);
+  const isActiveTrip =
+    trip.status !== "requested" &&
+    trip.status !== "trip_completed" &&
+    trip.status !== "cancelled";
+  const activeTrips = isActiveTrip
+    ? upsertTrip(current.activeTrips, trip)
+    : current.activeTrips.filter((item) => item.id !== trip.id);
+
+  return {
+    ...current,
+    queueTrips,
+    activeTrips,
+    completedTrips,
+    cancelledTrips,
+    totals: {
+      ...current.totals,
+      requested: queueTrips.length,
+      active: activeTrips.length,
+      completed: completedTrips.length,
+      cancelled: cancelledTrips.length
+    }
+  };
+};
+
+const persistSession = (session: AuthSession | null) => {
+  if (!session) {
+    window.localStorage.removeItem(STORAGE_KEY);
+    return;
   }
 
-  return (await response.json()) as T;
+  window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
+};
+
+const parseStoredSession = () => {
+  const savedSession = window.localStorage.getItem(STORAGE_KEY);
+
+  if (!savedSession) {
+    return null;
+  }
+
+  try {
+    return JSON.parse(savedSession) as AuthSession;
+  } catch {
+    window.localStorage.removeItem(STORAGE_KEY);
+    return null;
+  }
 };
 
 export default function App() {
+  const [authMode, setAuthMode] = useState<AuthMode>("sign_in");
+  const [email, setEmail] = useState("ops@divadrive.app");
+  const [password, setPassword] = useState("DivaDrive123");
+  const [fullName, setFullName] = useState("Operadora DIVA");
   const [phone, setPhone] = useState("999777111");
-  const [role, setRole] = useState<"operator" | "admin">("operator");
+  const [role, setRole] = useState<WebRole>("operator");
   const [session, setSession] = useState<AuthSession | null>(null);
   const [snapshot, setSnapshot] = useState<OpsDashboardSnapshot>(emptySnapshot);
   const [directory, setDirectory] = useState<AdminDirectorySnapshot>({
@@ -108,104 +172,391 @@ export default function App() {
     description: "",
     isActive: true
   });
+  const socketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<number | null>(null);
+  const resourceTimersRef = useRef<Record<string, number | null>>({});
+  const resourceInFlightRef = useRef(new Set<string>());
+  const resourceQueuedRef = useRef(new Set<string>());
 
   useEffect(() => {
-    const savedSession = window.localStorage.getItem(STORAGE_KEY);
-    if (!savedSession) {
-      setLoading(false);
+    const savedSession = parseStoredSession();
+    setSession(savedSession);
+    setLoading(savedSession !== null);
+  }, []);
+
+  const updateSession = (nextSession: AuthSession | null) => {
+    setSession(nextSession);
+    persistSession(nextSession);
+  };
+
+  const refreshSession = async (currentSession: AuthSession) => {
+    if (!currentSession.refreshToken) {
+      return null;
+    }
+
+    const response = await fetch(`${API_BASE_URL}/auth/refresh`, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json"
+      },
+      body: JSON.stringify({
+        refreshToken: currentSession.refreshToken
+      })
+    });
+
+    if (!response.ok) {
+      updateSession(null);
+      return null;
+    }
+
+    const nextSession = (await response.json()) as AuthSession;
+    updateSession(nextSession);
+    return nextSession;
+  };
+
+  const authorizedFetch = async <T,>(
+    path: string,
+    options?: RequestInit,
+    sessionOverride?: AuthSession
+  ): Promise<T> => {
+    const baseSession = sessionOverride ?? session;
+
+    if (!baseSession) {
+      throw new Error("missing_session");
+    }
+
+    const doFetch = async (activeSession: AuthSession) =>
+      fetch(`${API_BASE_URL}${path}`, {
+        ...options,
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${activeSession.accessToken}`,
+          ...(options?.headers ?? {})
+        }
+      });
+
+    let activeSession = baseSession;
+    let response = await doFetch(activeSession);
+
+    if (response.status === 401) {
+      const refreshedSession = await refreshSession(activeSession);
+
+      if (!refreshedSession) {
+        throw new Error("invalid_session");
+      }
+
+      activeSession = refreshedSession;
+      response = await doFetch(activeSession);
+    }
+
+    if (!response.ok) {
+      throw new Error(path);
+    }
+
+    return (await response.json()) as T;
+  };
+
+  const refreshResource = async (
+    key: string,
+    activeSession: AuthSession,
+    loader: () => Promise<void>
+  ) => {
+    if (resourceInFlightRef.current.has(key)) {
+      resourceQueuedRef.current.add(key);
       return;
     }
 
+    resourceInFlightRef.current.add(key);
     try {
-      const parsed = JSON.parse(savedSession) as AuthSession;
-      setSession(parsed);
+      await loader();
+      setError(null);
     } catch {
-      window.localStorage.removeItem(STORAGE_KEY);
-      setLoading(false);
+      setError("No pudimos cargar el panel o la sesion ya no es valida.");
+    } finally {
+      resourceInFlightRef.current.delete(key);
+
+      if (resourceQueuedRef.current.has(key)) {
+        resourceQueuedRef.current.delete(key);
+        void refreshResource(key, activeSession, loader);
+      }
     }
-  }, []);
+  };
+
+  const scheduleResourceRefresh = (
+    key: string,
+    activeSession: AuthSession,
+    loader: () => Promise<void>
+  ) => {
+    const timer = resourceTimersRef.current[key];
+
+    if (timer) {
+      window.clearTimeout(timer);
+    }
+
+    resourceTimersRef.current[key] = window.setTimeout(() => {
+      resourceTimersRef.current[key] = null;
+      void refreshResource(key, activeSession, loader);
+    }, 200);
+  };
+
+  const loadSnapshot = async (activeSession: AuthSession) => {
+    const nextSnapshot = await authorizedFetch<OpsDashboardSnapshot>(
+      "/ops/dashboard",
+      undefined,
+      activeSession
+    );
+    setSnapshot(nextSnapshot);
+  };
+
+  const loadDirectory = async (activeSession: AuthSession) => {
+    const nextDirectory = await authorizedFetch<AdminDirectorySnapshot>(
+      "/ops/directory",
+      undefined,
+      activeSession
+    );
+    setDirectory(nextDirectory);
+  };
+
+  const loadBusiness = async (activeSession: AuthSession) => {
+    const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>(
+      "/ops/business",
+      undefined,
+      activeSession
+    );
+    setBusiness(nextBusiness);
+    setPricingDraft(nextBusiness.pricing);
+  };
+
+  const loadCommercialMetrics = async (activeSession: AuthSession) => {
+    const nextCommercialMetrics = await authorizedFetch<CommercialMetricsSnapshot>(
+      "/ops/commercial-metrics",
+      undefined,
+      activeSession
+    );
+    setCommercialMetrics(nextCommercialMetrics);
+  };
+
+  const loadEventStream = async (activeSession: AuthSession) => {
+    const nextEventStream = await authorizedFetch<{ events: TripTimelineEvent[] }>(
+      "/ops/events",
+      undefined,
+      activeSession
+    );
+    setEventStream(nextEventStream.events);
+  };
+
+  const loadDashboard = async (activeSession: AuthSession, withLoading = false) => {
+    if (withLoading) {
+      setLoading(true);
+    }
+
+    try {
+      await Promise.all([
+        loadSnapshot(activeSession),
+        loadDirectory(activeSession),
+        loadBusiness(activeSession),
+        loadCommercialMetrics(activeSession),
+        loadEventStream(activeSession)
+      ]);
+      setError(null);
+    } catch {
+      setError("No pudimos cargar el panel o la sesion ya no es valida.");
+    } finally {
+      if (withLoading) {
+        setLoading(false);
+      }
+    }
+  };
 
   useEffect(() => {
     if (!session) {
+      setLoading(false);
       return;
     }
 
-    let mounted = true;
+    void loadDashboard(session, true);
+  }, [session]);
 
-    const loadDashboard = async () => {
-      try {
-        const [nextSnapshot, nextDirectory, nextBusiness, nextCommercialMetrics, nextEventStream] =
-          await Promise.all([
-          authorizedFetch<OpsDashboardSnapshot>(session, "/ops/dashboard"),
-          authorizedFetch<AdminDirectorySnapshot>(session, "/ops/directory"),
-          authorizedFetch<BusinessRulesSnapshot>(session, "/ops/business"),
-          authorizedFetch<CommercialMetricsSnapshot>(session, "/ops/commercial-metrics"),
-          authorizedFetch<{ events: TripTimelineEvent[] }>(session, "/ops/events")
-        ]);
-
-        if (mounted) {
-          setSnapshot(nextSnapshot);
-          setDirectory(nextDirectory);
-          setBusiness(nextBusiness);
-          setCommercialMetrics(nextCommercialMetrics);
-          setEventStream(nextEventStream.events);
-          setPricingDraft(nextBusiness.pricing);
-          setError(null);
-        }
-      } catch {
-        if (mounted) {
-          setError("No pudimos cargar el panel o la sesion vencio.");
-        }
-      } finally {
-        if (mounted) {
-          setLoading(false);
-        }
+  useEffect(() => {
+    if (!session) {
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
       }
+      socketRef.current?.close();
+      socketRef.current = null;
+      return;
+    }
+
+    let cancelled = false;
+
+    const connect = () => {
+      const socket = new WebSocket(
+        `${WS_BASE_URL}?token=${encodeURIComponent(session.accessToken)}`
+      );
+      socketRef.current = socket;
+
+      socket.onmessage = (event) => {
+        const payload = JSON.parse(event.data) as RealtimePayload;
+
+        if (payload.type === "session.ready") {
+          return;
+        }
+
+        switch (payload.type) {
+          case "ops.snapshot.refresh":
+            if (payload.trip) {
+              setSnapshot((current) => patchSnapshotWithTrip(current, payload.trip!));
+              break;
+            }
+            scheduleResourceRefresh("snapshot", session, () => loadSnapshot(session));
+            break;
+          case "ops.directory.refresh":
+            if (payload.driverProfile || payload.passengerProfile) {
+              setDirectory((current) => ({
+                drivers: payload.driverProfile
+                  ? [...current.drivers.filter((item) => item.id !== payload.driverProfile!.id), payload.driverProfile]
+                      .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                  : current.drivers,
+                passengers: payload.passengerProfile
+                  ? [
+                      ...current.passengers.filter(
+                        (item) => item.id !== payload.passengerProfile!.id
+                      ),
+                      payload.passengerProfile
+                    ].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                  : current.passengers
+              }));
+              break;
+            }
+            scheduleResourceRefresh("directory", session, () => loadDirectory(session));
+            break;
+          case "business.refresh":
+            if (payload.pricing || payload.promotion || payload.auditEntry) {
+              setBusiness((current) => ({
+                pricing: payload.pricing ?? current.pricing,
+                promotions: payload.promotion
+                  ? [
+                      payload.promotion,
+                      ...current.promotions.filter((item) => item.id !== payload.promotion!.id)
+                    ].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                  : current.promotions,
+                auditLog: payload.auditEntry
+                  ? [payload.auditEntry, ...current.auditLog.filter((item) => item.id !== payload.auditEntry!.id)]
+                      .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+                  : current.auditLog
+              }));
+              if (payload.pricing) {
+                setPricingDraft(payload.pricing);
+              }
+              break;
+            }
+            scheduleResourceRefresh("business", session, () => loadBusiness(session));
+            break;
+          case "commercial.refresh":
+            scheduleResourceRefresh("commercial", session, () => loadCommercialMetrics(session));
+            break;
+          case "ops.events.refresh":
+            if (payload.timelineEvent) {
+              setEventStream((current) =>
+                [payload.timelineEvent!, ...current.filter((item) => item.id !== payload.timelineEvent!.id)]
+                  .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+                  .slice(0, 30)
+              );
+              break;
+            }
+            scheduleResourceRefresh("events", session, () => loadEventStream(session));
+            break;
+          default:
+            break;
+        }
+      };
+
+      socket.onclose = () => {
+        if (cancelled) {
+          return;
+        }
+
+        reconnectTimerRef.current = window.setTimeout(() => {
+          connect();
+        }, 1500);
+      };
     };
 
-    void loadDashboard();
-    const interval = setInterval(() => {
-      void loadDashboard();
-    }, 4000);
+    connect();
 
     return () => {
-      mounted = false;
-      clearInterval(interval);
+      cancelled = true;
+      if (reconnectTimerRef.current) {
+        window.clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      for (const timer of Object.values(resourceTimersRef.current)) {
+        if (timer) {
+          window.clearTimeout(timer);
+        }
+      }
+      resourceTimersRef.current = {};
+      socketRef.current?.close();
+      socketRef.current = null;
     };
   }, [session]);
 
-  const handleSignIn = async () => {
+  const handleAuthSubmit = async () => {
     setLoading(true);
     try {
-      const nextSession = await fetch(`${API_BASE_URL}/auth/sign-in`, {
+      const path = authMode === "sign_in" ? "/auth/sign-in" : "/auth/sign-up";
+      const body =
+        authMode === "sign_in"
+          ? {
+              email,
+              password,
+              role
+            }
+          : {
+              email,
+              password,
+              fullName,
+              phone,
+              role
+            };
+
+      const nextSession = await fetch(`${API_BASE_URL}${path}`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json"
         },
-        body: JSON.stringify({
-          phone,
-          role
-        })
+        body: JSON.stringify(body)
       }).then(async (response) => {
         if (!response.ok) {
-          throw new Error("sign_in_failed");
+          throw new Error("auth_failed");
         }
+
         return (await response.json()) as AuthSession;
       });
 
-      setSession(nextSession);
-      window.localStorage.setItem(STORAGE_KEY, JSON.stringify(nextSession));
+      updateSession(nextSession);
       setError(null);
     } catch {
-      setError("No pudimos iniciar sesion en el panel.");
+      setError(
+        authMode === "sign_in"
+          ? "No pudimos iniciar sesion con esas credenciales."
+          : "No pudimos crear la cuenta administrativa."
+      );
       setLoading(false);
     }
   };
 
   const handleSignOut = () => {
-    window.localStorage.removeItem(STORAGE_KEY);
-    setSession(null);
+    updateSession(null);
     setSnapshot(emptySnapshot);
+    setDirectory({
+      drivers: [],
+      passengers: []
+    });
+    setBusiness(emptyBusiness);
+    setCommercialMetrics(emptyCommercialMetrics);
+    setEventStream(emptyEventStream);
     setLoading(false);
   };
 
@@ -213,20 +564,13 @@ export default function App() {
     incidentId: string,
     status: IncidentStatus
   ) => {
-    if (!session) {
-      return;
-    }
-
     try {
-      await authorizedFetch(session, `/ops/incidents/${incidentId}/status`, {
+      await authorizedFetch(`/ops/incidents/${incidentId}/status`, {
         method: "POST",
         body: JSON.stringify({ status })
       });
 
-      const nextSnapshot = await authorizedFetch<OpsDashboardSnapshot>(
-        session,
-        "/ops/dashboard"
-      );
+      const nextSnapshot = await authorizedFetch<OpsDashboardSnapshot>("/ops/dashboard");
       setSnapshot(nextSnapshot);
     } catch {
       setError("No pudimos actualizar la incidencia.");
@@ -237,20 +581,13 @@ export default function App() {
     driverId: string,
     approvalStatus: DriverApprovalStatus
   ) => {
-    if (!session) {
-      return;
-    }
-
     try {
-      await authorizedFetch(session, `/ops/drivers/${driverId}/approval`, {
+      await authorizedFetch(`/ops/drivers/${driverId}/approval`, {
         method: "POST",
         body: JSON.stringify({ approvalStatus })
       });
 
-      const nextDirectory = await authorizedFetch<AdminDirectorySnapshot>(
-        session,
-        "/ops/directory"
-      );
+      const nextDirectory = await authorizedFetch<AdminDirectorySnapshot>("/ops/directory");
       setDirectory(nextDirectory);
     } catch {
       setError("No pudimos actualizar la aprobacion de la conductora.");
@@ -265,12 +602,8 @@ export default function App() {
   };
 
   const handleSavePricing = async () => {
-    if (!session) {
-      return;
-    }
-
     try {
-      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>(session, "/ops/pricing", {
+      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>("/ops/pricing", {
         method: "POST",
         body: JSON.stringify(pricingDraft)
       });
@@ -283,22 +616,16 @@ export default function App() {
   };
 
   const handleCreatePromotion = async () => {
-    if (!session) {
-      return;
-    }
-
     try {
-      await authorizedFetch(session, "/ops/promotions", {
+      await authorizedFetch("/ops/promotions", {
         method: "POST",
         body: JSON.stringify({
           ...promotionDraft,
           code: promotionDraft.code.toUpperCase()
         })
       });
-      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>(
-        session,
-        "/ops/business"
-      );
+
+      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>("/ops/business");
       setBusiness(nextBusiness);
       setPromotionDraft({
         name: "",
@@ -320,17 +647,13 @@ export default function App() {
     promotionId: string,
     isActive: boolean
   ) => {
-    if (!session) {
-      return;
-    }
-
     const promotion = business.promotions.find((item) => item.id === promotionId);
     if (!promotion) {
       return;
     }
 
     try {
-      await authorizedFetch(session, `/ops/promotions/${promotionId}`, {
+      await authorizedFetch(`/ops/promotions/${promotionId}`, {
         method: "POST",
         body: JSON.stringify({
           name: promotion.name,
@@ -344,10 +667,7 @@ export default function App() {
           isActive
         } satisfies PromotionUpsertPayload)
       });
-      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>(
-        session,
-        "/ops/business"
-      );
+      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>("/ops/business");
       setBusiness(nextBusiness);
     } catch {
       setError("No pudimos actualizar la promocion.");
@@ -361,12 +681,12 @@ export default function App() {
           <p className="eyebrow">Panel Seguro</p>
           <h1>{SERVICE_NAME}</h1>
           <p className="lede">
-            Acceso administrativo para operador o admin antes de ver la operacion.
+            Acceso administrativo real con Supabase Auth para operador o admin.
           </p>
         </section>
 
         <section className="panel authPanel">
-          <h2>Iniciar sesion</h2>
+          <h2>{authMode === "sign_in" ? "Iniciar sesion" : "Crear acceso"}</h2>
           <div className="roleSwitch">
             {(["operator", "admin"] as const).map((option) => (
               <button
@@ -378,14 +698,52 @@ export default function App() {
               </button>
             ))}
           </div>
+          <div className="roleSwitch">
+            {([
+              { id: "sign_in", label: "Entrar" },
+              { id: "sign_up", label: "Crear cuenta" }
+            ] as const).map((option) => (
+              <button
+                key={option.id}
+                className={authMode === option.id ? "roleBtn active" : "roleBtn"}
+                onClick={() => setAuthMode(option.id)}
+              >
+                {option.label}
+              </button>
+            ))}
+          </div>
+          {authMode === "sign_up" ? (
+            <>
+              <input
+                value={fullName}
+                onChange={(event) => setFullName(event.target.value)}
+                placeholder="Nombre completo"
+                className="authInput"
+              />
+              <input
+                value={phone}
+                onChange={(event) => setPhone(event.target.value)}
+                placeholder="999777111"
+                className="authInput"
+              />
+            </>
+          ) : null}
           <input
-            value={phone}
-            onChange={(event) => setPhone(event.target.value)}
-            placeholder="999777111"
+            value={email}
+            onChange={(event) => setEmail(event.target.value)}
+            placeholder="ops@divadrive.app"
             className="authInput"
+            type="email"
           />
-          <button className="primaryAction" onClick={handleSignIn}>
-            Entrar al panel
+          <input
+            value={password}
+            onChange={(event) => setPassword(event.target.value)}
+            placeholder="Contrasena segura"
+            className="authInput"
+            type="password"
+          />
+          <button className="primaryAction" onClick={handleAuthSubmit}>
+            {authMode === "sign_in" ? "Entrar al panel" : "Crear acceso"}
           </button>
           {error ? <p className="errorText">{error}</p> : null}
         </section>
@@ -400,12 +758,13 @@ export default function App() {
           <p className="eyebrow">Panel Operativo</p>
           <h1>{SERVICE_NAME}</h1>
           <p className="lede">
-            Cola, viajes e incidencias desde un dashboard protegido por sesion.
+            Cola, viajes e incidencias desde un dashboard protegido por sesion real.
           </p>
         </div>
         <div className="sessionBox">
           <p>{session.user.fullName}</p>
           <p>{session.user.role}</p>
+          <p>{session.user.email}</p>
           <button className="secondaryAction" onClick={handleSignOut}>
             Cerrar sesion
           </button>
@@ -436,9 +795,7 @@ export default function App() {
           {snapshot.queueTrips.length === 0 ? (
             <p className="empty">No hay solicitudes pendientes.</p>
           ) : (
-            snapshot.queueTrips.map((trip) => (
-              <TripCard key={trip.id} trip={trip} accent="queue" />
-            ))
+            snapshot.queueTrips.map((trip) => <TripCard key={trip.id} trip={trip} accent="queue" />)
           )}
         </Panel>
 
@@ -446,9 +803,7 @@ export default function App() {
           {snapshot.activeTrips.length === 0 ? (
             <p className="empty">No hay viajes activos.</p>
           ) : (
-            snapshot.activeTrips.map((trip) => (
-              <TripCard key={trip.id} trip={trip} accent="active" />
-            ))
+            snapshot.activeTrips.map((trip) => <TripCard key={trip.id} trip={trip} accent="active" />)
           )}
         </Panel>
 
@@ -456,9 +811,7 @@ export default function App() {
           {snapshot.completedTrips.length === 0 ? (
             <p className="empty">Aun no hay viajes completados.</p>
           ) : (
-            snapshot.completedTrips.map((trip) => (
-              <TripCard key={trip.id} trip={trip} accent="done" />
-            ))
+            snapshot.completedTrips.map((trip) => <TripCard key={trip.id} trip={trip} accent="done" />)
           )}
         </Panel>
 
@@ -466,12 +819,9 @@ export default function App() {
           {snapshot.cancelledTrips.length === 0 ? (
             <p className="empty">No hay viajes cancelados.</p>
           ) : (
-            snapshot.cancelledTrips.map((trip) => (
-              <TripCard key={trip.id} trip={trip} accent="done" />
-            ))
+            snapshot.cancelledTrips.map((trip) => <TripCard key={trip.id} trip={trip} accent="done" />)
           )}
         </Panel>
-
         <Panel title="Incidencias" count={snapshot.incidents.length}>
           {snapshot.incidents.length === 0 ? (
             <p className="empty">No hay incidencias registradas.</p>
@@ -622,7 +972,6 @@ export default function App() {
             Guardar pricing
           </button>
         </Panel>
-
         <Panel title="Promociones" count={business.promotions.length}>
           <section className="formGrid">
             <label>
@@ -798,14 +1147,11 @@ export default function App() {
                 </div>
                 <p className="route">{entry.summary}</p>
                 <p className="meta">Actor: {entry.actorId}</p>
-                <p className="meta">
-                  {new Date(entry.occurredAt).toLocaleString()}
-                </p>
+                <p className="meta">{new Date(entry.occurredAt).toLocaleString()}</p>
               </section>
             ))
           )}
         </Panel>
-
         <Panel title="Metricas comerciales" count={commercialMetrics.promoPerformance.length}>
           <section className="tripCard active">
             <p className="meta">

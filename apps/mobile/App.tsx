@@ -1,4 +1,4 @@
-import { useEffect, useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
   ActivityIndicator,
   Alert,
@@ -11,7 +11,7 @@ import {
   TextInput,
   View
 } from "react-native";
-import MapView, { Marker, Polyline } from "react-native-maps";
+import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import * as Location from "expo-location";
 import {
   type DriverProfile,
@@ -27,16 +27,24 @@ import {
   type MapRegion,
   type OperationalNotification,
   type PlaceSearchResult,
+  type RealtimeEnvelope,
   type RideEstimate,
   type RideEstimateRequest,
   type RidePoint,
   type RideTrip,
-  type SignInPayload,
   type TripTimelineEvent
 } from "@diva-drive/domain";
 
 const API_BASE_URL = "http://10.0.2.2:4000";
-type AuthRole = SignInPayload["role"];
+const WS_BASE_URL = "ws://10.0.2.2:4000/ws";
+type AuthRole = "passenger" | "driver";
+type AuthMode = "sign_in" | "sign_up";
+type RealtimePayload = RealtimeEnvelope & {
+  trip?: RideTrip;
+  timelineEvent?: TripTimelineEvent;
+  notification?: OperationalNotification;
+  driverProfile?: DriverProfile;
+};
 
 const api = async <T,>(
   path: string,
@@ -63,16 +71,6 @@ const api = async <T,>(
   return (await response.json()) as T;
 };
 
-const fallbackSession = (phone: string, role: AuthRole): AuthSession => ({
-  accessToken: `demo-${role}-${phone.slice(-4) || "0000"}`,
-  user: {
-    id: `${role}-${phone.slice(-4) || "0000"}`,
-    role,
-    fullName: role === "driver" ? "Conductora Demo" : "Pasajera Demo",
-    phone
-  }
-});
-
 const nextStatusForTrip = (trip: RideTrip) => {
   if (trip.status === "matched") {
     return "driver_en_route";
@@ -92,26 +90,21 @@ const regionFromPoints = (origin: RidePoint, destination: RidePoint): MapRegion 
     Math.max(Math.abs(origin.longitude - destination.longitude), 0.02) * 2.2
 });
 
-const reportIncident = async (
-  session: AuthSession,
-  payload: CreateIncidentPayload
-) => api("/incidents", session, {
-  method: "POST",
-  body: JSON.stringify(payload)
-});
+const sortTrips = (trips: RideTrip[]) =>
+  [...trips].sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
 
-const cancelTrip = async (
-  session: AuthSession,
-  tripId: string,
-  payload: CancelTripPayload
-) => api<RideTrip>(`/trips/${tripId}/cancel`, session, {
-  method: "POST",
-  body: JSON.stringify(payload)
-});
+const upsertTrip = (trips: RideTrip[], trip: RideTrip) =>
+  sortTrips([trip, ...trips.filter((item) => item.id !== trip.id)]);
+
+const TERMINAL_TRIP_STATUSES = new Set<RideTrip["status"]>(["trip_completed", "cancelled"]);
 
 export default function App() {
+  const [authMode, setAuthMode] = useState<AuthMode>("sign_in");
   const [role, setRole] = useState<AuthRole>("passenger");
+  const [fullName, setFullName] = useState("Pasajera DIVA");
   const [phone, setPhone] = useState("999111222");
+  const [email, setEmail] = useState("pasajera@divadrive.app");
+  const [password, setPassword] = useState("DivaDrive123");
   const [session, setSession] = useState<AuthSession | null>(null);
   const [loading, setLoading] = useState(false);
   const [mapRegion, setMapRegion] = useState<MapRegion>(DEFAULT_HOME_BOOTSTRAP.mapRegion);
@@ -129,6 +122,216 @@ export default function App() {
   const [driverQueue, setDriverQueue] = useState<RideTrip[]>([]);
   const [driverHome, setDriverHome] = useState<DriverQueueSummary | null>(null);
   const [driverProfile, setDriverProfile] = useState<DriverProfile | null>(null);
+  const socketRef = useRef<WebSocket | null>(null);
+  const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const resourceTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
+  const resourceInFlightRef = useRef(new Set<string>());
+  const resourceQueuedRef = useRef(new Set<string>());
+
+  const refreshSession = async (currentSession: AuthSession) => {
+    if (!currentSession.refreshToken) {
+      return null;
+    }
+
+    try {
+      const nextSession = await api<AuthSession>("/auth/refresh", undefined, {
+        method: "POST",
+        body: JSON.stringify({
+          refreshToken: currentSession.refreshToken
+        })
+      });
+      setSession(nextSession);
+      return nextSession;
+    } catch {
+      setSession(null);
+      return null;
+    }
+  };
+
+  const apiWithSession = async <T,>(path: string, options?: RequestInit): Promise<T> => {
+    if (!session) {
+      throw new Error("missing_session");
+    }
+
+    try {
+      return await api<T>(path, session, options);
+    } catch {
+      const nextSession = await refreshSession(session);
+
+      if (!nextSession) {
+        throw new Error("invalid_session");
+      }
+
+      return api<T>(path, nextSession, options);
+    }
+  };
+
+  const refreshResource = async (
+    key: string,
+    loader: () => Promise<unknown>
+  ) => {
+    if (resourceInFlightRef.current.has(key)) {
+      resourceQueuedRef.current.add(key);
+      return;
+    }
+
+    resourceInFlightRef.current.add(key);
+    try {
+      await loader();
+    } finally {
+      resourceInFlightRef.current.delete(key);
+
+      if (resourceQueuedRef.current.has(key)) {
+        resourceQueuedRef.current.delete(key);
+        void refreshResource(key, loader);
+      }
+    }
+  };
+
+  const scheduleResourceRefresh = (
+    key: string,
+    loader: () => Promise<unknown>
+  ) => {
+    const timer = resourceTimersRef.current[key];
+
+    if (timer) {
+      clearTimeout(timer);
+    }
+
+    resourceTimersRef.current[key] = setTimeout(() => {
+      resourceTimersRef.current[key] = null;
+      void refreshResource(key, loader);
+    }, 200);
+  };
+
+  const loadPassengerHome = async (activeSession: AuthSession) => {
+    const home = await api<HomeBootstrap>("/home/passenger", activeSession).catch(
+      () => DEFAULT_HOME_BOOTSTRAP
+    );
+    setPassengerHome(home);
+    setNotifications(home.notifications ?? []);
+    setDestination((current) => current ?? home.suggestedDestinations[0] ?? null);
+    return home;
+  };
+
+  const loadPassengerOrigin = async (activeSession: AuthSession, home?: HomeBootstrap) => {
+    const nextHome = home ?? passengerHome ?? DEFAULT_HOME_BOOTSTRAP;
+    const currentTrip = await api<{ trip: RideTrip | null }>("/trips/active", activeSession).catch(
+      () => ({ trip: null })
+    );
+    const fallbackOrigin: RidePoint = currentTrip.trip?.origin ?? {
+      label: "Punto de recojo",
+      address: "Centro operativo inicial de DIVA DRIVE",
+      latitude: nextHome.mapRegion.latitude,
+      longitude: nextHome.mapRegion.longitude
+    };
+
+    const permission = await Location.requestForegroundPermissionsAsync();
+    if (permission.status === "granted") {
+      try {
+        const current = await Location.getCurrentPositionAsync({});
+        setOrigin(
+          currentTrip.trip?.origin ?? {
+            label: "Ubicacion actual",
+            address: "Posicion detectada por el dispositivo",
+            latitude: current.coords.latitude,
+            longitude: current.coords.longitude
+          }
+        );
+        return;
+      } catch {
+        setOrigin(fallbackOrigin);
+        return;
+      }
+    }
+
+    setOrigin(fallbackOrigin);
+  };
+
+  const loadActiveTrip = async (activeSession: AuthSession) => {
+    const trip = await api<{ trip: RideTrip | null }>("/trips/active", activeSession).catch(
+      () => ({ trip: null })
+    );
+
+    setActiveTrip(trip.trip);
+    setEstimate(trip.trip?.estimate ?? null);
+
+    if (activeSession.user.role === "passenger") {
+      setDestination((current) => trip.trip?.destination ?? current);
+      setOrigin((current) => trip.trip?.origin ?? current);
+    }
+
+    if (!trip.trip) {
+      setTimelineEvents([]);
+    }
+
+    return trip.trip;
+  };
+
+  const loadTripHistory = async (activeSession: AuthSession) => {
+    const history = await api<{ trips: RideTrip[] }>("/trips/history", activeSession).catch(() => ({
+      trips: []
+    }));
+    setTripHistory(history.trips);
+  };
+
+  const loadTimeline = async (activeSession: AuthSession, tripId?: string) => {
+    const targetTripId = tripId ?? activeTrip?.id;
+    if (!targetTripId) {
+      setTimelineEvents([]);
+      return;
+    }
+
+    const timeline = await api<{ events: TripTimelineEvent[] }>(
+      `/trips/${targetTripId}/events`,
+      activeSession
+    ).catch(() => ({ events: [] }));
+    setTimelineEvents(timeline.events);
+  };
+
+  const loadDriverHome = async (activeSession: AuthSession) => {
+    const home = await api<DriverQueueSummary>("/home/driver", activeSession).catch(() => ({
+      queueSize: 0,
+      activeTrip: null,
+      driverProfile: null,
+      notifications: []
+    }));
+
+    setDriverHome(home);
+    setDriverProfile(home.driverProfile);
+    setNotifications(home.notifications ?? []);
+    setActiveTrip((current) => current ?? home.activeTrip);
+    return home;
+  };
+
+  const loadDriverQueue = async (activeSession: AuthSession) => {
+    const queue = await api<{ trips: RideTrip[] }>("/driver/trips/queue", activeSession).catch(
+      () => ({ trips: [] })
+    );
+    setDriverQueue(queue.trips);
+  };
+
+  const loadPassengerState = async (activeSession: AuthSession) => {
+    const [home, trip] = await Promise.all([
+      loadPassengerHome(activeSession),
+      loadActiveTrip(activeSession),
+      loadTripHistory(activeSession)
+    ]);
+    await Promise.all([
+      loadTimeline(activeSession, trip?.id),
+      loadPassengerOrigin(activeSession, home)
+    ]);
+  };
+
+  const loadDriverState = async (activeSession: AuthSession) => {
+    const [, , trip] = await Promise.all([
+      loadDriverHome(activeSession),
+      loadDriverQueue(activeSession),
+      loadActiveTrip(activeSession),
+      loadTripHistory(activeSession)
+    ]);
+    await loadTimeline(activeSession, trip?.id);
+  };
 
   useEffect(() => {
     if (!session) {
@@ -141,94 +344,9 @@ export default function App() {
       setLoading(true);
       try {
         if (session.user.role === "passenger") {
-          const [home, trip, history, permission] = await Promise.all([
-            api<HomeBootstrap>("/home/passenger", session).catch(() => DEFAULT_HOME_BOOTSTRAP),
-            api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
-            api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] })),
-            Location.requestForegroundPermissionsAsync()
-          ]);
-
-          if (!mounted) {
-            return;
-          }
-
-          setPassengerHome(home);
-          setActiveTrip(trip.trip);
-          setTripHistory(history.trips);
-          setNotifications(home.notifications ?? []);
-          setDestination(trip.trip?.destination ?? home.suggestedDestinations[0] ?? null);
-          setEstimate(trip.trip?.estimate ?? null);
-          if (trip.trip) {
-            const timeline = await api<{ events: TripTimelineEvent[] }>(
-              `/trips/${trip.trip.id}/events`,
-              session
-            ).catch(() => ({ events: [] }));
-            if (mounted) {
-              setTimelineEvents(timeline.events);
-            }
-          } else {
-            setTimelineEvents([]);
-          }
-
-          const fallbackOrigin: RidePoint = trip.trip?.origin ?? {
-            label: "Punto de recojo",
-            address: "Centro operativo inicial de DIVA DRIVE",
-            latitude: home.mapRegion.latitude,
-            longitude: home.mapRegion.longitude
-          };
-
-          if (permission.status === "granted") {
-            const current = await Location.getCurrentPositionAsync({});
-            if (!mounted) {
-              return;
-            }
-
-            setOrigin(
-              trip.trip?.origin ?? {
-                label: "Ubicacion actual",
-                address: "Posicion detectada por el dispositivo",
-                latitude: current.coords.latitude,
-                longitude: current.coords.longitude
-              }
-            );
-          } else {
-            setOrigin(fallbackOrigin);
-          }
+          await loadPassengerState(session);
         } else {
-          const [home, queue, trip, history] = await Promise.all([
-            api<DriverQueueSummary>("/home/driver", session).catch(() => ({
-              queueSize: 0,
-              activeTrip: null,
-              driverProfile: null,
-              notifications: []
-            })),
-            api<{ trips: RideTrip[] }>("/driver/trips/queue", session).catch(() => ({ trips: [] })),
-            api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
-            api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] }))
-          ]);
-
-          if (!mounted) {
-            return;
-          }
-
-          setDriverHome(home);
-          setDriverProfile(home.driverProfile);
-          setDriverQueue(queue.trips);
-          setActiveTrip(trip.trip ?? home.activeTrip);
-          setTripHistory(history.trips);
-          setNotifications(home.notifications ?? []);
-          const activeDriverTrip = trip.trip ?? home.activeTrip;
-          if (activeDriverTrip) {
-            const timeline = await api<{ events: TripTimelineEvent[] }>(
-              `/trips/${activeDriverTrip.id}/events`,
-              session
-            ).catch(() => ({ events: [] }));
-            if (mounted) {
-              setTimelineEvents(timeline.events);
-            }
-          } else {
-            setTimelineEvents([]);
-          }
+          await loadDriverState(session);
         }
       } finally {
         if (mounted) {
@@ -245,65 +363,194 @@ export default function App() {
 
   useEffect(() => {
     if (!session) {
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      Object.values(resourceTimersRef.current).forEach((timer) => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+      });
+      resourceTimersRef.current = {};
+      socketRef.current?.close();
+      socketRef.current = null;
       return;
     }
 
-    const timer = setInterval(() => {
-      if (session.user.role === "passenger") {
-        void Promise.all([
-          api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
-          api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] })),
-          api<HomeBootstrap>("/home/passenger", session).catch(() => DEFAULT_HOME_BOOTSTRAP)
-        ])
-          .then(async ([payload, history, home]) => {
-            setActiveTrip(payload.trip);
-            setTripHistory(history.trips);
-            setNotifications(home.notifications ?? []);
-            if (payload.trip) {
-              const timeline = await api<{ events: TripTimelineEvent[] }>(
-                `/trips/${payload.trip.id}/events`,
-                session
-              ).catch(() => ({ events: [] }));
-              setTimelineEvents(timeline.events);
-            } else {
-              setTimelineEvents([]);
-            }
-          })
-          .catch(() => undefined);
-      } else {
-        void Promise.all([
-          api<{ trips: RideTrip[] }>("/driver/trips/queue", session).catch(() => ({ trips: [] })),
-          api<{ trip: RideTrip | null }>("/trips/active", session).catch(() => ({ trip: null })),
-          api<DriverQueueSummary>("/home/driver", session).catch(() => ({
-            queueSize: 0,
-            activeTrip: null,
-            driverProfile: null,
-            notifications: []
-          })),
-          api<{ trips: RideTrip[] }>("/trips/history", session).catch(() => ({ trips: [] }))
-        ]).then(async ([queue, trip, home, history]) => {
-          setDriverQueue(queue.trips);
-          setActiveTrip(trip.trip ?? home.activeTrip);
-          setDriverHome(home);
-          setDriverProfile(home.driverProfile);
-          setTripHistory(history.trips);
-          setNotifications(home.notifications ?? []);
-          const activeDriverTrip = trip.trip ?? home.activeTrip;
-          if (activeDriverTrip) {
-            const timeline = await api<{ events: TripTimelineEvent[] }>(
-              `/trips/${activeDriverTrip.id}/events`,
-              session
-            ).catch(() => ({ events: [] }));
-            setTimelineEvents(timeline.events);
+    let cancelled = false;
+
+    const connect = () => {
+      const socket = new WebSocket(
+        `${WS_BASE_URL}?token=${encodeURIComponent(session.accessToken)}`
+      );
+      socketRef.current = socket;
+
+      socket.onmessage = (event) => {
+        const payload = JSON.parse(event.data) as RealtimePayload;
+
+        if (payload.type === "session.ready") {
+          if (session.user.role === "passenger") {
+            scheduleResourceRefresh("passenger.bootstrap", () => loadPassengerState(session));
           } else {
-            setTimelineEvents([]);
+            scheduleResourceRefresh("driver.bootstrap", () => loadDriverState(session));
           }
-        });
-      }
-    }, 4000);
+          return;
+        }
+
+        if (session.user.role === "passenger") {
+          switch (payload.type) {
+            case "trip.active.refresh":
+              if (payload.trip) {
+                setActiveTrip(TERMINAL_TRIP_STATUSES.has(payload.trip.status) ? null : payload.trip);
+                setEstimate(payload.trip.estimate);
+                setDestination(payload.trip.destination);
+                setOrigin(payload.trip.origin);
+                setTripHistory((current) => upsertTrip(current, payload.trip!));
+                return;
+              }
+              scheduleResourceRefresh("passenger.activeTrip", async () => {
+                const trip = await loadActiveTrip(session);
+                await loadTimeline(session, payload.tripId ?? trip?.id);
+              });
+              return;
+            case "trip.history.refresh":
+              if (payload.trip) {
+                setTripHistory((current) => upsertTrip(current, payload.trip!));
+                return;
+              }
+              scheduleResourceRefresh("passenger.history", () => loadTripHistory(session));
+              return;
+            case "trip.timeline.refresh":
+              if (payload.timelineEvent) {
+                setTimelineEvents((current) =>
+                  [payload.timelineEvent!, ...current.filter((item) => item.id !== payload.timelineEvent!.id)]
+                    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+                );
+                return;
+              }
+              scheduleResourceRefresh("passenger.timeline", () =>
+                loadTimeline(session, payload.tripId)
+              );
+              return;
+            case "notifications.refresh":
+              if (payload.notification) {
+                setNotifications((current) =>
+                  [payload.notification!, ...current.filter((item) => item.id !== payload.notification!.id)]
+                    .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                    .slice(0, 3)
+                );
+                return;
+              }
+              scheduleResourceRefresh("passenger.home", () => loadPassengerHome(session));
+              return;
+            default:
+              return;
+          }
+        }
+
+        switch (payload.type) {
+          case "trip.queue.refresh":
+            if (payload.trip) {
+              setDriverQueue((current) =>
+                payload.trip!.status === "requested"
+                  ? upsertTrip(current, payload.trip!)
+                  : current.filter((item) => item.id !== payload.trip!.id)
+              );
+              return;
+            }
+            scheduleResourceRefresh("driver.queue", () => loadDriverQueue(session));
+            return;
+          case "trip.active.refresh":
+            if (payload.trip) {
+              setActiveTrip(TERMINAL_TRIP_STATUSES.has(payload.trip.status) ? null : payload.trip);
+              setEstimate(payload.trip.estimate);
+              setTripHistory((current) => upsertTrip(current, payload.trip!));
+              setDriverQueue((current) => current.filter((item) => item.id !== payload.trip!.id));
+              return;
+            }
+            scheduleResourceRefresh("driver.activeTrip", async () => {
+              const trip = await loadActiveTrip(session);
+              await loadTimeline(session, payload.tripId ?? trip?.id);
+            });
+            return;
+          case "trip.history.refresh":
+            if (payload.trip) {
+              setTripHistory((current) => upsertTrip(current, payload.trip!));
+              return;
+            }
+            scheduleResourceRefresh("driver.history", () => loadTripHistory(session));
+            return;
+          case "trip.timeline.refresh":
+            if (payload.timelineEvent) {
+              setTimelineEvents((current) =>
+                [payload.timelineEvent!, ...current.filter((item) => item.id !== payload.timelineEvent!.id)]
+                  .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
+              );
+              return;
+            }
+            scheduleResourceRefresh("driver.timeline", () =>
+              loadTimeline(session, payload.tripId)
+            );
+            return;
+          case "notifications.refresh":
+            if (payload.notification) {
+              setNotifications((current) =>
+                [payload.notification!, ...current.filter((item) => item.id !== payload.notification!.id)]
+                  .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                  .slice(0, 3)
+              );
+              return;
+            }
+            scheduleResourceRefresh("driver.home", () => loadDriverHome(session));
+            return;
+          case "driver.profile.refresh":
+            if (payload.driverProfile) {
+              setDriverProfile(payload.driverProfile);
+              setDriverHome((current) =>
+                current
+                  ? {
+                      ...current,
+                      driverProfile: payload.driverProfile!
+                    }
+                  : current
+              );
+              return;
+            }
+            scheduleResourceRefresh("driver.profile", () => loadDriverHome(session));
+            return;
+          default:
+            return;
+        }
+      };
+
+      socket.onclose = () => {
+        if (cancelled) {
+          return;
+        }
+
+        reconnectTimerRef.current = setTimeout(() => {
+          connect();
+        }, 1500);
+      };
+    };
+
+    connect();
 
     return () => {
-      clearInterval(timer);
+      cancelled = true;
+      if (reconnectTimerRef.current) {
+        clearTimeout(reconnectTimerRef.current);
+        reconnectTimerRef.current = null;
+      }
+      Object.values(resourceTimersRef.current).forEach((timer) => {
+        if (timer) {
+          clearTimeout(timer);
+        }
+      });
+      resourceTimersRef.current = {};
+      socketRef.current?.close();
+      socketRef.current = null;
     };
   }, [session]);
 
@@ -327,10 +574,7 @@ export default function App() {
     }
 
     const timer = setTimeout(() => {
-      void api<PlaceSearchResult>(
-        `/places/search?query=${encodeURIComponent(trimmedQuery)}`,
-        session
-      )
+      void apiWithSession<PlaceSearchResult>(`/places/search?query=${encodeURIComponent(trimmedQuery)}`)
         .then((payload) => setSearchResults(payload.results))
         .catch(() => setSearchResults([]));
     }, 250);
@@ -340,25 +584,46 @@ export default function App() {
     };
   }, [destinationQuery, session]);
 
-  const handleSignIn = async () => {
-    if (phone.trim().length < 9) {
+  const handleAuth = async () => {
+    if (email.trim().length < 5 || password.trim().length < 8) {
+      Alert.alert("Credenciales incompletas", "Ingresa email y contrasena validos.");
+      return;
+    }
+
+    if (authMode === "sign_up" && phone.trim().length < 9) {
       Alert.alert("Telefono incompleto", "Ingresa un numero valido para continuar.");
       return;
     }
 
     setLoading(true);
     try {
-      const nextSession = await api<AuthSession>("/auth/sign-in", undefined, {
-        method: "POST",
-        body: JSON.stringify({
-          phone,
-          role
-        })
-      }).catch(() => fallbackSession(phone, role));
+      const nextSession = await api<AuthSession>(
+        authMode === "sign_in" ? "/auth/sign-in" : "/auth/sign-up",
+        undefined,
+        {
+          method: "POST",
+          body: JSON.stringify({
+            email,
+            password,
+            role,
+            ...(authMode === "sign_up"
+              ? {
+                  fullName,
+                  phone
+                }
+              : {})
+          })
+        }
+      );
       setSession(nextSession);
       setActiveTrip(null);
       setEstimate(null);
       setDriverQueue([]);
+    } catch {
+      Alert.alert(
+        authMode === "sign_in" ? "No pudimos iniciar sesion" : "No pudimos crear tu cuenta",
+        "Revisa tus credenciales o valida la configuracion de Supabase."
+      );
     } finally {
       setLoading(false);
     }
@@ -371,7 +636,7 @@ export default function App() {
 
     setLoading(true);
     try {
-      const nextEstimate = await api<RideEstimate>("/trips/estimate", session, {
+      const nextEstimate = await apiWithSession<RideEstimate>("/trips/estimate", {
         method: "POST",
         body: JSON.stringify({
           origin,
@@ -392,7 +657,7 @@ export default function App() {
 
     setLoading(true);
     try {
-      const trip = await api<RideTrip>("/trips", session, {
+      const trip = await apiWithSession<RideTrip>("/trips", {
         method: "POST",
         body: JSON.stringify({
           passengerId: session.user.id,
@@ -416,7 +681,7 @@ export default function App() {
 
     setLoading(true);
     try {
-      const trip = await api<RideTrip>(`/driver/trips/${tripId}/accept`, session, {
+      const trip = await apiWithSession<RideTrip>(`/driver/trips/${tripId}/accept`, {
         method: "POST"
       });
       setActiveTrip(trip);
@@ -445,7 +710,7 @@ export default function App() {
 
     setLoading(true);
     try {
-      const trip = await api<RideTrip>(`/driver/trips/${activeTrip.id}/status`, session, {
+      const trip = await apiWithSession<RideTrip>(`/driver/trips/${activeTrip.id}/status`, {
         method: "POST",
         body: JSON.stringify({
           status: nextStatus
@@ -464,14 +729,17 @@ export default function App() {
 
     setLoading(true);
     try {
-      await reportIncident(session, {
-        tripId: activeTrip.id,
-        severity: "medium",
-        category: "operacion",
-        notes:
-          session.user.role === "driver"
-            ? "Incidencia reportada desde la app de conductora."
-            : "Incidencia reportada desde la app de pasajera."
+      await apiWithSession("/incidents", {
+        method: "POST",
+        body: JSON.stringify({
+          tripId: activeTrip.id,
+          severity: "medium",
+          category: "operacion",
+          notes:
+            session.user.role === "driver"
+              ? "Incidencia reportada desde la app de conductora."
+              : "Incidencia reportada desde la app de pasajera."
+        } satisfies CreateIncidentPayload)
       });
       Alert.alert("Incidencia registrada", "Ya quedó visible en el panel operativo.");
     } finally {
@@ -486,11 +754,14 @@ export default function App() {
 
     setLoading(true);
     try {
-      await cancelTrip(session, activeTrip.id, {
-        reason:
-          session.user.role === "driver"
-            ? "Cancelacion operativa desde conductora"
-            : "Cancelacion solicitada por pasajera"
+      await apiWithSession<RideTrip>(`/trips/${activeTrip.id}/cancel`, {
+        method: "POST",
+        body: JSON.stringify({
+          reason:
+            session.user.role === "driver"
+              ? "Cancelacion operativa desde conductora"
+              : "Cancelacion solicitada por pasajera"
+        } satisfies CancelTripPayload)
       });
       setActiveTrip(null);
     } finally {
@@ -505,7 +776,7 @@ export default function App() {
         <View style={styles.auth}>
           <Text style={styles.kicker}>DIVA DRIVE</Text>
           <Text style={styles.title}>{SERVICE_NAME}</Text>
-          <Text style={styles.copy}>Acceso inicial para pasajera y conductora.</Text>
+          <Text style={styles.copy}>Acceso real con Supabase Auth para pasajera y conductora.</Text>
           <View style={styles.card}>
             <View style={styles.row}>
               {(["passenger", "driver"] as const).map((option) => (
@@ -520,16 +791,58 @@ export default function App() {
                 </Pressable>
               ))}
             </View>
+            <View style={styles.row}>
+              {([
+                { id: "sign_in", label: "Entrar" },
+                { id: "sign_up", label: "Crear cuenta" }
+              ] as const).map((option) => (
+                <Pressable
+                  key={option.id}
+                  onPress={() => setAuthMode(option.id)}
+                  style={[styles.chip, authMode === option.id && styles.chipActive]}
+                >
+                  <Text style={authMode === option.id ? styles.chipTextActive : styles.chipText}>
+                    {option.label}
+                  </Text>
+                </Pressable>
+              ))}
+            </View>
+            {authMode === "sign_up" ? (
+              <TextInput
+                value={fullName}
+                onChangeText={setFullName}
+                placeholder="Nombre completo"
+                style={styles.input}
+              />
+            ) : null}
             <TextInput
-              value={phone}
-              onChangeText={setPhone}
-              placeholder="999111222"
-              keyboardType="phone-pad"
+              value={email}
+              onChangeText={setEmail}
+              placeholder="pasajera@divadrive.app"
+              autoCapitalize="none"
+              keyboardType="email-address"
               style={styles.input}
             />
-            <Pressable onPress={handleSignIn} style={styles.button}>
+            <TextInput
+              value={password}
+              onChangeText={setPassword}
+              placeholder="Contrasena segura"
+              secureTextEntry
+              style={styles.input}
+            />
+            {authMode === "sign_up" ? (
+              <TextInput
+                value={phone}
+                onChangeText={setPhone}
+                placeholder="999111222"
+                keyboardType="phone-pad"
+                style={styles.input}
+              />
+            ) : null}
+            <Pressable onPress={handleAuth} style={styles.button}>
               <Text style={styles.buttonText}>
-                Continuar como {role === "passenger" ? "pasajera" : "conductora"}
+                {authMode === "sign_in" ? "Entrar como" : "Crear cuenta de"}{" "}
+                {role === "passenger" ? "pasajera" : "conductora"}
               </Text>
             </Pressable>
           </View>
@@ -543,7 +856,12 @@ export default function App() {
       <StatusBar barStyle="dark-content" />
       <View style={styles.shell}>
         <View style={styles.mapWrap}>
-          <MapView style={styles.map} initialRegion={mapRegion} region={mapRegion}>
+          <MapView
+            provider={PROVIDER_GOOGLE}
+            style={styles.map}
+            initialRegion={mapRegion}
+            region={mapRegion}
+          >
             {estimate?.route.points.length ? (
               <Polyline
                 coordinates={estimate.route.points}
@@ -877,7 +1195,11 @@ export default function App() {
           <View style={styles.card}>
             <Text style={styles.heading}>Sesion</Text>
             <Text style={styles.muted}>Rol: {session.user.role}</Text>
+            <Text style={styles.muted}>Email: {session.user.email}</Text>
             <Text style={styles.muted}>Telefono: {session.user.phone}</Text>
+            <Pressable onPress={() => setSession(null)} style={styles.ghostButton}>
+              <Text style={styles.ghostButtonText}>Cerrar sesion</Text>
+            </Pressable>
           </View>
         </ScrollView>
       </View>

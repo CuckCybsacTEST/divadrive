@@ -13,4 +13,17 @@ export const supabaseAdmin = hasSupabaseConfig
     })
   : null;
 
+export const supabaseAuth = appEnv.supabaseUrl && appEnv.supabaseAnonKey
+  ? createClient(appEnv.supabaseUrl, appEnv.supabaseAnonKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      },
+      db: {
+        schema: appEnv.supabaseSchema
+      }
+    })
+  : null;
+
 export const isSupabaseReady = appEnv.supabaseEnabled && supabaseAdmin !== null;
+export const isSupabaseAuthReady = appEnv.supabaseEnabled && supabaseAuth !== null;

@@ -1,4 +1,24 @@
 {
-  "drivers": [],
-  "passengers": []
+  "drivers": [
+    {
+      "id": "driver-1222",
+      "fullName": "Conductora Demo",
+      "phone": "999111222",
+      "city": "Lima",
+      "approvalStatus": "pending",
+      "documentsSubmitted": true,
+      "licenseNumber": "LIC-1222",
+      "vehicleDescription": "Sedan blanco - onboarding inicial",
+      "createdAt": "2026-03-10T19:34:00.658Z"
+    }
+  ],
+  "passengers": [
+    {
+      "id": "passenger-1222",
+      "fullName": "Pasajera Demo",
+      "phone": "999111222",
+      "city": "Lima",
+      "createdAt": "2026-03-10T18:25:12.294Z"
+    }
+  ]
 }

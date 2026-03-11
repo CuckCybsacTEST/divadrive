@@ -1,6 +1,7 @@
 import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { randomUUID } from "node:crypto";
+import type { User } from "@supabase/supabase-js";
 import { z } from "zod";
 import {
   type BusinessRulesSnapshot,
@@ -24,6 +25,7 @@ import {
   type PricingConfigUpdate,
   type Promotion,
   type PromotionUpsertPayload,
+  type RealtimeEnvelope,
   SERVICE_NAME,
   type ActiveTripStatus,
   type AuthSession,
@@ -36,17 +38,50 @@ import {
   type TripTimelineSnapshot,
   type TripHistorySnapshot,
   type TripIncident,
+  USER_ROLES,
   TRIP_EVENT_TYPES,
   TRIP_STATUSES
 } from "@diva-drive/domain";
-import { readBusinessRules, writeBusinessRules } from "./business-store.js";
+import {
+  getBusinessAuditEntryById,
+  appendBusinessAuditEntry,
+  getPromotionById,
+  getPricingConfig,
+  listBusinessAuditEntries,
+  listPromotions,
+  readBusinessRules,
+  savePricingConfig,
+  savePromotion
+} from "./business-store.js";
 import { appEnv } from "./env.js";
-import { readEvents, writeEvents } from "./event-store.js";
-import { readIncidents, writeIncidents } from "./incident-store.js";
-import { readSession, writeSession } from "./session-store.js";
+import {
+  appendEvent,
+  getEventById,
+  listEventsByTrip,
+  listRecentEvents,
+  readEvents
+} from "./event-store.js";
+import { getIncident, readIncidents, saveIncident } from "./incident-store.js";
+import { isSupabaseAuthReady, isSupabaseReady, supabaseAdmin, supabaseAuth } from "./supabase.js";
+import { createRealtimeHub, createSupabaseRealtimeBridge } from "./realtime.js";
 import { syncLocalDataToSupabase } from "./supabase-bootstrap.js";
-import { readTrips, writeTrips } from "./trip-store.js";
-import { readUsers, writeUsers } from "./user-store.js";
+import {
+  getTrip,
+  listTripsByDriver,
+  listTripsByPassenger,
+  listTripsByStatus,
+  readTrips,
+  saveTrip
+} from "./trip-store.js";
+import {
+  getDriverProfile,
+  getPassengerProfile,
+  listDriverProfiles,
+  listPassengerProfiles,
+  readUsers,
+  saveDriverProfile,
+  savePassengerProfile
+} from "./user-store.js";
 
 const app = Fastify({
   logger: true
@@ -64,37 +99,25 @@ const passengerProfilesById = new Map<string, PassengerProfile>();
 let pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG;
 const promotionsById = new Map<string, Promotion>();
 const businessAuditLog: BusinessAuditEntry[] = [];
-
-const persistTrips = async () => {
-  await writeTrips(Array.from(tripsById.values()));
-};
-
-const persistIncidents = async () => {
-  await writeIncidents(Array.from(incidentsById.values()));
-};
-
-const persistEvents = async () => {
-  await writeEvents(Array.from(tripEventsById.values()));
-};
-
-const persistUsers = async () => {
-  await writeUsers({
-    drivers: Array.from(driverProfilesById.values()),
-    passengers: Array.from(passengerProfilesById.values())
-  });
-};
-
-const persistBusinessRules = async () => {
-  await writeBusinessRules({
-    pricing: pricingConfig,
-    promotions: Array.from(promotionsById.values()),
-    auditLog: businessAuditLog
-  });
-};
+let isBootstrapped = false;
+const isTestRuntime = process.argv.includes("--test");
 
 const signInSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  role: z.enum(USER_ROLES).optional()
+});
+
+const signUpSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  fullName: z.string().min(3),
   phone: z.string().min(9),
   role: z.enum(["passenger", "driver", "operator", "admin"])
+});
+
+const refreshSessionSchema = z.object({
+  refreshToken: z.string().min(1)
 });
 
 const ridePointSchema = z.object({
@@ -164,8 +187,22 @@ const requireSession = async (authorizationHeader?: string) => {
     return null;
   }
 
-  return readSession(token);
+  if (isSupabaseReady && supabaseAdmin) {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+
+    if (error || !data.user) {
+      return null;
+    }
+
+    return toAuthSession(data.user, {
+      accessToken: token
+    });
+  }
+
+  return null;
 };
+
+const realtimeHub = createRealtimeHub(async (token) => requireSession(`Bearer ${token}`));
 
 const requireRole = (
   session: AuthSession | null,
@@ -189,6 +226,359 @@ const requireAnyRole = (
   return session;
 };
 
+const getTripAudience = (trip: Pick<RideTrip, "passengerId" | "driverId">) =>
+  [trip.passengerId, trip.driverId].filter(Boolean) as string[];
+
+type RealtimePublishEvent = Omit<RealtimeEnvelope, "id" | "occurredAt"> & {
+  trip?: RideTrip;
+  timelineEvent?: TripTimelineEvent;
+  notification?: OperationalNotification;
+  driverProfile?: DriverProfile;
+  passengerProfile?: PassengerProfile;
+  pricing?: PricingConfig;
+  promotion?: Promotion;
+  auditEntry?: BusinessAuditEntry;
+};
+
+const realtimeDedupWindowMs = 2500;
+const recentRealtimePublications = new Map<string, number>();
+
+const stableSerialize = (value: unknown): string => {
+  if (Array.isArray(value)) {
+    return `[${value.map(stableSerialize).join(",")}]`;
+  }
+
+  if (value && typeof value === "object") {
+    const record = value as Record<string, unknown>;
+    return `{${Object.keys(record)
+      .sort()
+      .map((key) => `${JSON.stringify(key)}:${stableSerialize(record[key])}`)
+      .join(",")}}`;
+  }
+
+  return JSON.stringify(value);
+};
+
+const getRealtimeDedupKey = (
+  event: RealtimePublishEvent,
+  targets: {
+    ops?: boolean;
+    userIds?: ("passenger" | "driver" | "operator" | "admin" | string)[];
+    roles?: ("passenger" | "driver" | "operator" | "admin")[];
+  }
+) =>
+  stableSerialize({
+    event,
+    targets: {
+      ops: targets.ops ?? false,
+      userIds: [...(targets.userIds ?? [])].sort(),
+      roles: [...(targets.roles ?? [])].sort()
+    }
+  });
+
+const shouldSkipRealtimePublish = (
+  event: RealtimePublishEvent,
+  targets: {
+    ops?: boolean;
+    userIds?: ("passenger" | "driver" | "operator" | "admin" | string)[];
+    roles?: ("passenger" | "driver" | "operator" | "admin")[];
+  }
+) => {
+  const now = Date.now();
+
+  for (const [key, timestamp] of recentRealtimePublications.entries()) {
+    if (now - timestamp > realtimeDedupWindowMs) {
+      recentRealtimePublications.delete(key);
+    }
+  }
+
+  const dedupKey = getRealtimeDedupKey(event, targets);
+  const lastPublishedAt = recentRealtimePublications.get(dedupKey);
+
+  if (lastPublishedAt && now - lastPublishedAt <= realtimeDedupWindowMs) {
+    return true;
+  }
+
+  recentRealtimePublications.set(dedupKey, now);
+  return false;
+};
+
+const publishRealtime = (
+  event: RealtimePublishEvent,
+  targets: {
+    ops?: boolean;
+    userIds?: string[];
+    roles?: ("passenger" | "driver" | "operator" | "admin")[];
+  }
+) => {
+  if (shouldSkipRealtimePublish(event, targets)) {
+    return;
+  }
+
+  realtimeHub.publish(event, targets);
+};
+
+const publishTripRealtime = (trip: RideTrip, reason: string) => {
+  const userIds = getTripAudience(trip);
+
+  publishRealtime(
+    { type: "trip.active.refresh", tripId: trip.id, reason, trip },
+    { userIds, ops: true }
+  );
+  publishRealtime(
+    { type: "trip.history.refresh", tripId: trip.id, reason, trip },
+    { userIds }
+  );
+  publishRealtime(
+    { type: "notifications.refresh", tripId: trip.id, reason, trip },
+    { userIds }
+  );
+  publishRealtime(
+    { type: "ops.snapshot.refresh", tripId: trip.id, reason, trip },
+    { ops: true }
+  );
+  publishRealtime({ type: "commercial.refresh", tripId: trip.id, reason }, { ops: true });
+  publishRealtime(
+    { type: "trip.queue.refresh", tripId: trip.id, reason, trip },
+    { roles: ["driver"] }
+  );
+};
+
+const toNotificationFromEvent = (event: TripTimelineEvent): OperationalNotification => ({
+  id: event.id,
+  level:
+    event.type === "incident_created"
+      ? "warning"
+      : event.type === "trip_completed"
+        ? "success"
+        : "info",
+  message: event.message,
+  createdAt: event.occurredAt
+});
+
+const publishTripTimelineRealtime = (
+  trip: RideTrip,
+  reason: string,
+  timelineEvent?: TripTimelineEvent
+) => {
+  const userIds = getTripAudience(trip);
+
+  publishRealtime(
+    { type: "trip.timeline.refresh", tripId: trip.id, reason, timelineEvent },
+    { userIds }
+  );
+  publishRealtime(
+    { type: "ops.events.refresh", tripId: trip.id, reason, timelineEvent },
+    { ops: true }
+  );
+  publishRealtime({ type: "notifications.refresh", tripId: trip.id, reason }, { userIds });
+  if (timelineEvent) {
+    publishRealtime(
+      {
+        type: "notifications.refresh",
+        tripId: trip.id,
+        reason,
+        notification: toNotificationFromEvent(timelineEvent),
+        trip
+      },
+      { userIds }
+    );
+  }
+};
+
+const publishTripRealtimeByAudience = (payload: {
+  passengerId?: string;
+  driverId?: string;
+  tripId?: string;
+  reason: string;
+  trip?: RideTrip;
+}) => {
+  const userIds = [payload.passengerId, payload.driverId].filter(Boolean) as string[];
+
+  publishRealtime(
+    {
+      type: "trip.active.refresh",
+      tripId: payload.tripId,
+      reason: payload.reason,
+      trip: payload.trip
+    },
+    { userIds, ops: true }
+  );
+  publishRealtime(
+    {
+      type: "trip.history.refresh",
+      tripId: payload.tripId,
+      reason: payload.reason,
+      trip: payload.trip
+    },
+    { userIds }
+  );
+  publishRealtime(
+    {
+      type: "notifications.refresh",
+      tripId: payload.tripId,
+      reason: payload.reason,
+      trip: payload.trip
+    },
+    { userIds }
+  );
+  publishRealtime(
+    {
+      type: "ops.snapshot.refresh",
+      tripId: payload.tripId,
+      reason: payload.reason,
+      trip: payload.trip
+    },
+    { ops: true }
+  );
+  publishRealtime(
+    { type: "commercial.refresh", tripId: payload.tripId, reason: payload.reason },
+    { ops: true }
+  );
+  publishRealtime(
+    {
+      type: "trip.queue.refresh",
+      tripId: payload.tripId,
+      reason: payload.reason,
+      trip: payload.trip
+    },
+    { roles: ["driver"] }
+  );
+};
+
+const publishTripTimelineRealtimeByAudience = (payload: {
+  passengerId?: string;
+  driverId?: string;
+  tripId?: string;
+  reason: string;
+  timelineEvent?: TripTimelineEvent;
+  trip?: RideTrip;
+}) => {
+  const userIds = [payload.passengerId, payload.driverId].filter(Boolean) as string[];
+
+  publishRealtime(
+    {
+      type: "trip.timeline.refresh",
+      tripId: payload.tripId,
+      reason: payload.reason,
+      timelineEvent: payload.timelineEvent
+    },
+    { userIds }
+  );
+  publishRealtime(
+    {
+      type: "ops.events.refresh",
+      tripId: payload.tripId,
+      reason: payload.reason,
+      timelineEvent: payload.timelineEvent
+    },
+    { ops: true }
+  );
+  publishRealtime(
+    {
+      type: "notifications.refresh",
+      tripId: payload.tripId,
+      reason: payload.reason,
+      trip: payload.trip,
+      notification: payload.timelineEvent
+        ? toNotificationFromEvent(payload.timelineEvent)
+        : undefined
+    },
+    { userIds }
+  );
+};
+
+const publishDirectoryRealtime = (
+  reason: string,
+  targets?: { userIds?: string[] },
+  payload?: { driverProfile?: DriverProfile; passengerProfile?: PassengerProfile }
+) => {
+  publishRealtime({ type: "ops.directory.refresh", reason, ...payload }, { ops: true });
+
+  if (targets?.userIds?.length) {
+    publishRealtime(
+      { type: "driver.profile.refresh", reason, ...payload },
+      { userIds: targets.userIds }
+    );
+  }
+};
+
+const publishBusinessRealtime = (
+  reason: string,
+  payload?: {
+    pricing?: PricingConfig;
+    promotion?: Promotion;
+    auditEntry?: BusinessAuditEntry;
+  }
+) => {
+  publishRealtime({ type: "business.refresh", reason, ...payload }, { ops: true });
+  publishRealtime({ type: "commercial.refresh", reason }, { ops: true });
+  publishRealtime({ type: "ops.events.refresh", reason, auditEntry: payload?.auditEntry }, { ops: true });
+};
+
+const supabaseRealtimeBridge = createSupabaseRealtimeBridge({
+  supabase: supabaseAdmin,
+  schema: appEnv.supabaseSchema,
+  onTripChanged: (payload) => {
+    publishTripRealtimeByAudience(payload);
+  },
+  onTripTimelineChanged: (payload) => {
+    publishTripTimelineRealtimeByAudience(payload);
+  },
+  onDirectoryChanged: ({ userId, reason, driverProfile, passengerProfile }) => {
+    publishDirectoryRealtime(
+      reason,
+      userId ? { userIds: [userId] } : undefined,
+      {
+        driverProfile,
+        passengerProfile
+      }
+    );
+  },
+  onBusinessChanged: ({ reason, pricing, promotion, auditEntry }) => {
+    publishBusinessRealtime(reason, {
+      pricing,
+      promotion,
+      auditEntry
+    });
+  },
+  resolveTripAudience: async (tripId) => {
+    const trip = await getTripById(tripId);
+
+    if (!trip) {
+      return null;
+    }
+
+    return {
+      passengerId: trip.passengerId,
+      driverId: trip.driverId,
+      tripId: trip.id
+    };
+  },
+  resolveTrip: async (tripId) => getTripById(tripId),
+  resolveTimelineEvent: async (eventId) => {
+    const event = await getEventById(eventId);
+    return event ? hydrateEvent(event) : null;
+  },
+  resolveDriverProfile: async (driverId) => {
+    const profile = await getDriverProfile(driverId);
+    return profile ? hydrateDriverProfile(profile) : null;
+  },
+  resolvePassengerProfile: async (passengerId) => {
+    const profile = await getPassengerProfile(passengerId);
+    return profile ? hydratePassengerProfile(profile) : null;
+  },
+  resolvePricing: async () => getPricingConfig(),
+  resolvePromotion: async (promotionId) => {
+    const promotion = await getPromotionById(promotionId);
+    return promotion ? hydratePromotion(promotion) : null;
+  },
+  resolveBusinessAuditEntry: async (entryId) => {
+    const entry = await getBusinessAuditEntryById(entryId);
+    return entry ? hydrateBusinessAuditEntry(entry) : null;
+  }
+});
+
 const hydrateTrip = (trip: RideTrip) => {
   tripsById.set(trip.id, trip);
   return trip;
@@ -202,6 +592,30 @@ const hydrateIncident = (incident: TripIncident) => {
 const hydrateEvent = (event: TripTimelineEvent) => {
   tripEventsById.set(event.id, event);
   return event;
+};
+
+const hydrateDriverProfile = (profile: DriverProfile) => {
+  driverProfilesById.set(profile.id, profile);
+  return profile;
+};
+
+const hydratePassengerProfile = (profile: PassengerProfile) => {
+  passengerProfilesById.set(profile.id, profile);
+  return profile;
+};
+
+const hydratePromotion = (promotion: Promotion) => {
+  promotionsById.set(promotion.id, promotion);
+  return promotion;
+};
+
+const hydrateBusinessAuditEntry = (entry: BusinessAuditEntry) => {
+  const existingIndex = businessAuditLog.findIndex((current) => current.id === entry.id);
+  if (existingIndex >= 0) {
+    businessAuditLog.splice(existingIndex, 1);
+  }
+  businessAuditLog.unshift(entry);
+  return entry;
 };
 
 const toRadians = (value: number) => (value * Math.PI) / 180;
@@ -242,23 +656,51 @@ const getBusinessSnapshot = (): BusinessRulesSnapshot => ({
   auditLog: [...businessAuditLog].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
 });
 
+const hydrateBusinessState = (snapshot: BusinessRulesSnapshot) => {
+  pricingConfig = snapshot.pricing;
+  promotionsById.clear();
+  for (const promotion of snapshot.promotions) {
+    promotionsById.set(promotion.id, promotion);
+  }
+  businessAuditLog.length = 0;
+  businessAuditLog.push(...snapshot.auditLog);
+  return getBusinessSnapshot();
+};
+
+const hydrateDirectoryState = (payload: AdminDirectorySnapshot) => {
+  driverProfilesById.clear();
+  passengerProfilesById.clear();
+  for (const driver of payload.drivers) {
+    driverProfilesById.set(driver.id, driver);
+  }
+  for (const passenger of payload.passengers) {
+    passengerProfilesById.set(passenger.id, passenger);
+  }
+  return {
+    drivers: [...payload.drivers].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    passengers: [...payload.passengers].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+  };
+};
+
 const appendBusinessAudit = (
   session: AuthSession,
   action: BusinessAuditEntry["action"],
   summary: string
 ) => {
-  businessAuditLog.unshift({
+  const entry = {
     id: `biz-${Date.now()}-${businessAuditLog.length + 1}`,
     actorId: session.user.id,
     actorRole: session.user.role as BusinessAuditEntry["actorRole"],
     action,
     summary,
     occurredAt: new Date().toISOString()
-  });
+  };
+  businessAuditLog.unshift(entry);
+  return entry;
 };
 
 const isPassengerNew = async (passengerId: string) => {
-  const trips = await readTrips();
+  const trips = await listTripsByPassenger(passengerId);
   return !trips.some((trip) => trip.passengerId === passengerId);
 };
 
@@ -431,39 +873,114 @@ const buildDriverEta = (status: ActiveTripStatus) => {
   }
 };
 
-const createSession = async (payload: z.infer<typeof signInSchema>): Promise<AuthSession> => {
-  const idSuffix = payload.phone.replace(/\D/g, "").slice(-4) || "0000";
-  const session: AuthSession = {
-    accessToken: `session-${randomUUID()}`,
-    user: {
-      id: `${payload.role}-${idSuffix}`,
-      role: payload.role,
-      fullName:
-        payload.role === "driver"
-          ? "Conductora Demo"
-          : payload.role === "operator"
-            ? "Operadora Demo"
-            : payload.role === "admin"
-              ? "Admin Demo"
-              : "Pasajera Demo",
-      phone: payload.phone
-    }
-  };
+const inferUserRole = (user: User): AuthSession["user"]["role"] => {
+  const roleCandidate = user.app_metadata?.role ?? user.user_metadata?.role;
+  return USER_ROLES.includes(roleCandidate) ? roleCandidate : "passenger";
+};
 
-  await writeSession(session);
+const toAuthSession = (
+  user: User,
+  tokens: {
+    accessToken: string;
+    refreshToken?: string;
+    expiresAt?: number | null;
+  }
+): AuthSession => ({
+  accessToken: tokens.accessToken,
+  refreshToken: tokens.refreshToken ?? "",
+  expiresAt: tokens.expiresAt ? new Date(tokens.expiresAt * 1000).toISOString() : null,
+  user: {
+    id: user.id,
+    role: inferUserRole(user),
+    fullName:
+      user.user_metadata?.full_name ??
+      user.user_metadata?.fullName ??
+      user.email?.split("@")[0] ??
+      "Cuenta DIVA",
+    phone: user.user_metadata?.phone ?? user.phone ?? "",
+    email: user.email ?? ""
+  }
+});
+
+const signInWithSupabase = async (payload: z.infer<typeof signInSchema>): Promise<AuthSession> => {
+  if (!isSupabaseAuthReady || !supabaseAuth) {
+    throw new Error("supabase_auth_not_ready");
+  }
+
+  const { data, error } = await supabaseAuth.auth.signInWithPassword({
+    email: payload.email,
+    password: payload.password
+  });
+
+  if (error || !data.session || !data.user) {
+    throw error ?? new Error("invalid_auth_credentials");
+  }
+
+  const session = toAuthSession(data.user, {
+    accessToken: data.session.access_token,
+    refreshToken: data.session.refresh_token,
+    expiresAt: data.session.expires_at ?? null
+  });
+
+  if (payload.role && session.user.role !== payload.role) {
+    throw new Error("role_mismatch");
+  }
+
   return session;
 };
 
-const ensureProfileForSession = async (session: AuthSession) => {
-  const persistedUsers = await readUsers();
-  const persistedDriversById = new Map(
-    persistedUsers.drivers.map((driver) => [driver.id, driver])
-  );
-  const persistedPassengersById = new Map(
-    persistedUsers.passengers.map((passenger) => [passenger.id, passenger])
-  );
+const signUpWithSupabase = async (payload: z.infer<typeof signUpSchema>): Promise<AuthSession> => {
+  if (!isSupabaseReady || !supabaseAdmin || !isSupabaseAuthReady || !supabaseAuth) {
+    throw new Error("supabase_auth_not_ready");
+  }
 
-  if (session.user.role === "driver" && !persistedDriversById.has(session.user.id)) {
+  const { data: createdUserData, error: createUserError } = await supabaseAdmin.auth.admin.createUser({
+    email: payload.email,
+    password: payload.password,
+    email_confirm: true,
+    user_metadata: {
+      full_name: payload.fullName,
+      phone: payload.phone,
+      role: payload.role
+    },
+    app_metadata: {
+      role: payload.role
+    }
+  });
+
+  if (createUserError || !createdUserData.user) {
+    throw createUserError ?? new Error("sign_up_failed");
+  }
+
+  return signInWithSupabase({
+    email: payload.email,
+    password: payload.password,
+    role: payload.role
+  });
+};
+
+const refreshSupabaseSession = async (refreshToken: string): Promise<AuthSession> => {
+  if (!isSupabaseAuthReady || !supabaseAuth) {
+    throw new Error("supabase_auth_not_ready");
+  }
+
+  const { data, error } = await supabaseAuth.auth.refreshSession({
+    refresh_token: refreshToken
+  });
+
+  if (error || !data.session || !data.user) {
+    throw error ?? new Error("session_refresh_failed");
+  }
+
+  return toAuthSession(data.user, {
+    accessToken: data.session.access_token,
+    refreshToken: data.session.refresh_token,
+    expiresAt: data.session.expires_at ?? null
+  });
+};
+
+const ensureProfileForSession = async (session: AuthSession) => {
+  if (session.user.role === "driver" && !(await getDriverProfile(session.user.id))) {
     const profile: DriverProfile = {
       id: session.user.id,
       fullName: session.user.fullName,
@@ -476,11 +993,10 @@ const ensureProfileForSession = async (session: AuthSession) => {
       createdAt: new Date().toISOString()
     };
     driverProfilesById.set(profile.id, profile);
-    persistedUsers.drivers.push(profile);
-    await writeUsers(persistedUsers);
+    await saveDriverProfile(profile);
   }
 
-  if (session.user.role === "passenger" && !persistedPassengersById.has(session.user.id)) {
+  if (session.user.role === "passenger" && !(await getPassengerProfile(session.user.id))) {
     const profile: PassengerProfile = {
       id: session.user.id,
       fullName: session.user.fullName,
@@ -489,13 +1005,12 @@ const ensureProfileForSession = async (session: AuthSession) => {
       createdAt: new Date().toISOString()
     };
     passengerProfilesById.set(profile.id, profile);
-    persistedUsers.passengers.push(profile);
-    await writeUsers(persistedUsers);
+    await savePassengerProfile(profile);
   }
 };
 
 const getPassengerActiveTrip = async (passengerId: string) => {
-  const trips = (await readTrips()).filter(
+  const trips = (await listTripsByPassenger(passengerId)).filter(
     (trip) =>
       trip.passengerId === passengerId &&
       trip.status !== "trip_completed" &&
@@ -507,7 +1022,7 @@ const getPassengerActiveTrip = async (passengerId: string) => {
 
 const getDriverActiveTrip = async (driverId: string) => {
   const trip =
-    (await readTrips()).find(
+    (await listTripsByDriver(driverId)).find(
       (trip) =>
         trip.driverId === driverId &&
         trip.status !== "trip_completed" &&
@@ -518,9 +1033,7 @@ const getDriverActiveTrip = async (driverId: string) => {
 };
 
 const getDriverQueue = async () => {
-  return (await readTrips())
-    .filter((trip) => trip.status === "requested")
-    .map(hydrateTrip);
+  return (await listTripsByStatus("requested")).map(hydrateTrip);
 };
 
 const getTripById = async (tripId: string) => {
@@ -530,7 +1043,7 @@ const getTripById = async (tripId: string) => {
     return cachedTrip;
   }
 
-  const trip = (await readTrips()).find((entry) => entry.id === tripId) ?? null;
+  const trip = await getTrip(tripId);
   return trip ? hydrateTrip(trip) : null;
 };
 
@@ -541,8 +1054,7 @@ const getDriverProfileById = async (driverId: string) => {
     return cachedProfile;
   }
 
-  const users = await readUsers();
-  const profile = users.drivers.find((entry) => entry.id === driverId) ?? null;
+  const profile = await getDriverProfile(driverId);
 
   if (profile) {
     driverProfilesById.set(profile.id, profile);
@@ -574,22 +1086,17 @@ const createTripEvent = async (event: Omit<TripTimelineEvent, "id">) => {
   };
 
   hydrateEvent(nextEvent);
-  await persistEvents();
-  return nextEvent;
+  return appendEvent(nextEvent);
 };
 
 const getTripTimeline = async (tripId: string): Promise<TripTimelineSnapshot> => ({
-  events: (await readEvents())
-    .filter((event) => event.tripId === tripId)
+  events: (await listEventsByTrip(tripId))
     .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
     .map(hydrateEvent)
 });
 
 const getOpsEventStream = async () =>
-  (await readEvents())
-    .sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
-    .slice(0, 30)
-    .map(hydrateEvent);
+  (await listRecentEvents(30)).map(hydrateEvent);
 
 const getRecentOperationalNotifications = async (
   session: AuthSession,
@@ -618,19 +1125,33 @@ const getRecentOperationalNotifications = async (
 };
 
 const getOpsSnapshot = async (): Promise<OpsDashboardSnapshot> => {
-  const allTrips = (await readTrips())
+  const [requestedTrips, completedTripsRaw, cancelledTripsRaw, allTripsRaw, incidentsRaw] =
+    await Promise.all([
+      listTripsByStatus("requested"),
+      listTripsByStatus("trip_completed"),
+      listTripsByStatus("cancelled"),
+      readTrips(),
+      readIncidents()
+    ]);
+  const allTrips = allTripsRaw
     .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
     .map(hydrateTrip);
-  const queueTrips = allTrips.filter((trip) => trip.status === "requested");
-  const completedTrips = allTrips.filter((trip) => trip.status === "trip_completed");
-  const cancelledTrips = allTrips.filter((trip) => trip.status === "cancelled");
+  const queueTrips = requestedTrips
+    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
+    .map(hydrateTrip);
+  const completedTrips = completedTripsRaw
+    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
+    .map(hydrateTrip);
+  const cancelledTrips = cancelledTripsRaw
+    .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
+    .map(hydrateTrip);
   const activeTrips = allTrips.filter(
     (trip) =>
       trip.status !== "requested" &&
       trip.status !== "trip_completed" &&
       trip.status !== "cancelled"
   );
-  const incidents = (await readIncidents())
+  const incidents = incidentsRaw
     .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
     .map(hydrateIncident);
 
@@ -704,12 +1225,11 @@ const getCommercialMetrics = async (): Promise<CommercialMetricsSnapshot> => {
 };
 
 const getTripHistoryForSession = async (session: AuthSession): Promise<TripHistorySnapshot> => {
-  const trips = (await readTrips())
-    .filter((trip) =>
-      session.user.role === "driver"
-        ? trip.driverId === session.user.id
-        : trip.passengerId === session.user.id
-    )
+  const trips = (
+    session.user.role === "driver"
+      ? await listTripsByDriver(session.user.id)
+      : await listTripsByPassenger(session.user.id)
+  )
     .sort((a, b) => b.requestedAt.localeCompare(a.requestedAt))
     .map(hydrateTrip);
 
@@ -802,7 +1322,11 @@ app.get("/ops/business", async (request, reply) => {
     };
   }
 
-  return getBusinessSnapshot();
+  return hydrateBusinessState({
+    pricing: await getPricingConfig(),
+    promotions: await listPromotions(),
+    auditLog: await listBusinessAuditEntries()
+  });
 });
 
 app.get("/ops/commercial-metrics", async (request, reply) => {
@@ -852,16 +1376,10 @@ app.get("/ops/directory", async (request, reply) => {
     };
   }
 
-  const payload: AdminDirectorySnapshot = {
-    drivers: Array.from(driverProfilesById.values()).sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt)
-    ),
-    passengers: Array.from(passengerProfilesById.values()).sort((a, b) =>
-      b.createdAt.localeCompare(a.createdAt)
-    )
-  };
-
-  return payload;
+  return hydrateDirectoryState({
+    drivers: await listDriverProfiles(),
+    passengers: await listPassengerProfiles()
+  });
 });
 
 app.get("/ops/trips", async (request, reply) => {
@@ -928,23 +1446,33 @@ app.post<{ Params: { incidentId: string }; Body: IncidentStatusUpdate }>(
       };
     }
 
-    const incident = incidentsById.get(request.params.incidentId);
+      const incident =
+        incidentsById.get(request.params.incidentId) ??
+        (await getIncident(request.params.incidentId));
 
-    if (!incident) {
-      reply.status(404);
-      return {
-        error: "incident_not_found"
+      if (!incident) {
+        reply.status(404);
+        return {
+          error: "incident_not_found"
+        };
+      }
+
+      incidentsById.set(incident.id, incident);
+
+      const updatedIncident: TripIncident = {
+        ...incident,
+        status: parsedPayload.data.status
       };
-    }
 
-    const updatedIncident: TripIncident = {
-      ...incident,
-      status: parsedPayload.data.status
-    };
+      incidentsById.set(updatedIncident.id, updatedIncident);
+      const persistedIncident = await saveIncident(updatedIncident);
+      const trip = await getTripById(persistedIncident.tripId);
 
-    incidentsById.set(updatedIncident.id, updatedIncident);
-    await persistIncidents();
-    return updatedIncident;
+      if (trip) {
+        publishTripRealtime(trip, `incident_${persistedIncident.status}`);
+      }
+
+      return persistedIncident;
   }
 );
 
@@ -986,9 +1514,16 @@ app.post<{ Params: { driverId: string }; Body: DriverApprovalUpdate }>(
       approvalStatus: parsedPayload.data.approvalStatus
     };
 
-    driverProfilesById.set(updatedProfile.id, updatedProfile);
-    await persistUsers();
-    return updatedProfile;
+      const persistedProfile = await saveDriverProfile(updatedProfile);
+      driverProfilesById.set(persistedProfile.id, persistedProfile);
+      publishDirectoryRealtime(
+        "driver_approval_updated",
+        {
+          userIds: [persistedProfile.id]
+        },
+        { driverProfile: persistedProfile }
+      );
+      return persistedProfile;
   }
 );
 
@@ -1014,15 +1549,19 @@ app.post<{ Body: PricingConfigUpdate }>("/ops/pricing", async (request, reply) =
     };
   }
 
-  pricingConfig = parsedPayload.data;
-  appendBusinessAudit(
-    session,
-    "pricing_updated",
-    `Pricing actualizado a base ${parsedPayload.data.currency} ${parsedPayload.data.baseFare.toFixed(2)} y surge ${parsedPayload.data.surgeMultiplier.toFixed(1)}x`
-  );
-  await persistBusinessRules();
-  return getBusinessSnapshot();
-});
+  pricingConfig = await savePricingConfig(parsedPayload.data);
+    const auditEntry = appendBusinessAudit(
+      session,
+      "pricing_updated",
+      `Pricing actualizado a base ${parsedPayload.data.currency} ${parsedPayload.data.baseFare.toFixed(2)} y surge ${parsedPayload.data.surgeMultiplier.toFixed(1)}x`
+    );
+    await appendBusinessAuditEntry(auditEntry);
+    publishBusinessRealtime("pricing_updated", {
+      pricing: pricingConfig,
+      auditEntry
+    });
+    return getBusinessSnapshot();
+  });
 
 app.post<{ Body: PromotionUpsertPayload }>("/ops/promotions", async (request, reply) => {
   const session = requireAnyRole(
@@ -1053,15 +1592,20 @@ app.post<{ Body: PromotionUpsertPayload }>("/ops/promotions", async (request, re
     code: parsedPayload.data.code.trim().toUpperCase()
   };
 
-  promotionsById.set(promotion.id, promotion);
-  appendBusinessAudit(
-    session,
-    "promotion_created",
-    `Promocion ${promotion.code} creada para audiencia ${promotion.audience} en modo ${promotion.applyMode}`
-  );
-  await persistBusinessRules();
-  reply.status(201);
-  return promotion;
+  const persistedPromotion = await savePromotion(promotion);
+  promotionsById.set(persistedPromotion.id, persistedPromotion);
+    const auditEntry = appendBusinessAudit(
+      session,
+      "promotion_created",
+      `Promocion ${persistedPromotion.code} creada para audiencia ${persistedPromotion.audience} en modo ${persistedPromotion.applyMode}`
+    );
+    await appendBusinessAuditEntry(auditEntry);
+    publishBusinessRealtime("promotion_created", {
+      promotion: persistedPromotion,
+      auditEntry
+    });
+    reply.status(201);
+    return persistedPromotion;
 });
 
 app.post<{ Params: { promotionId: string }; Body: PromotionUpsertPayload }>(
@@ -1103,16 +1647,21 @@ app.post<{ Params: { promotionId: string }; Body: PromotionUpsertPayload }>(
       code: parsedPayload.data.code.trim().toUpperCase()
     };
 
-    promotionsById.set(updatedPromotion.id, updatedPromotion);
-    appendBusinessAudit(
-      session,
-      "promotion_updated",
-      `Promocion ${updatedPromotion.code} actualizada y ahora esta ${updatedPromotion.isActive ? "activa" : "pausada"}`
-    );
-    await persistBusinessRules();
-    return updatedPromotion;
-  }
-);
+    const persistedPromotion = await savePromotion(updatedPromotion);
+    promotionsById.set(persistedPromotion.id, persistedPromotion);
+      const auditEntry = appendBusinessAudit(
+        session,
+        "promotion_updated",
+        `Promocion ${persistedPromotion.code} actualizada y ahora esta ${persistedPromotion.isActive ? "activa" : "pausada"}`
+      );
+      await appendBusinessAuditEntry(auditEntry);
+      publishBusinessRealtime("promotion_updated", {
+        promotion: persistedPromotion,
+        auditEntry
+      });
+      return persistedPromotion;
+    }
+  );
 
 app.post("/auth/sign-in", async (request, reply) => {
   const parsedPayload = signInSchema.safeParse(request.body);
@@ -1124,9 +1673,109 @@ app.post("/auth/sign-in", async (request, reply) => {
     };
   }
 
-  const session = await createSession(parsedPayload.data);
+  let session: AuthSession;
+
+  if (!isSupabaseReady) {
+    reply.status(503);
+    return {
+      error: "auth_unavailable"
+    };
+  }
+
+  try {
+    session = await signInWithSupabase(parsedPayload.data);
+  } catch (error) {
+    reply.status(
+      error instanceof Error && error.message === "role_mismatch" ? 403 : 401
+    );
+    return {
+      error:
+        error instanceof Error && error.message === "role_mismatch"
+          ? "role_mismatch"
+          : "invalid_credentials"
+    };
+  }
+
   await ensureProfileForSession(session);
   return session;
+});
+
+app.post("/auth/sign-up", async (request, reply) => {
+  const parsedPayload = signUpSchema.safeParse(request.body);
+
+  if (!parsedPayload.success) {
+    reply.status(400);
+    return {
+      error: "invalid_sign_up_payload"
+    };
+  }
+
+  let session: AuthSession;
+
+  if (!isSupabaseReady) {
+    reply.status(503);
+    return {
+      error: "auth_unavailable"
+    };
+  }
+
+  try {
+    session = await signUpWithSupabase(parsedPayload.data);
+  } catch {
+    reply.status(409);
+    return {
+      error: "sign_up_failed"
+    };
+  }
+
+  await ensureProfileForSession(session);
+  publishDirectoryRealtime(
+    "sign_up_profile_created",
+    {
+      userIds: session.user.role === "driver" ? [session.user.id] : undefined
+    },
+    {
+      driverProfile:
+        session.user.role === "driver"
+          ? (await getDriverProfile(session.user.id)) ?? undefined
+          : undefined,
+      passengerProfile:
+        session.user.role === "passenger"
+          ? (await getPassengerProfile(session.user.id)) ?? undefined
+          : undefined
+    }
+  );
+  reply.status(201);
+  return session;
+});
+
+app.post("/auth/refresh", async (request, reply) => {
+  const parsedPayload = refreshSessionSchema.safeParse(request.body);
+
+  if (!parsedPayload.success) {
+    reply.status(400);
+    return {
+      error: "invalid_refresh_payload"
+    };
+  }
+
+  if (!isSupabaseReady) {
+    reply.status(400);
+    return {
+      error: "refresh_not_available"
+    };
+  }
+
+  try {
+    const session = await refreshSupabaseSession(parsedPayload.data.refreshToken);
+    await ensureProfileForSession(session);
+    return session;
+  } catch {
+    reply.status(401);
+    return {
+      error: "invalid_refresh_token"
+    };
+  }
 });
 
 app.get("/auth/session", async (request, reply) => {
@@ -1139,6 +1788,7 @@ app.get("/auth/session", async (request, reply) => {
     };
   }
 
+  await ensureProfileForSession(session);
   return session;
 });
 
@@ -1255,18 +1905,20 @@ app.post("/trips", async (request, reply) => {
     requestedAt: new Date().toISOString()
   };
 
-  tripsById.set(trip.id, trip);
-  await persistTrips();
-  await createTripEvent({
-    tripId: trip.id,
+  const persistedTrip = await saveTrip(trip);
+  tripsById.set(persistedTrip.id, persistedTrip);
+  const tripRequestedEvent = await createTripEvent({
+    tripId: persistedTrip.id,
     type: "trip_requested",
-    occurredAt: trip.requestedAt,
+    occurredAt: persistedTrip.requestedAt,
     actorId: session.user.id,
     actorRole: session.user.role,
-    message: `Solicitud creada desde ${trip.origin.label} hacia ${trip.destination.label}`
+    message: `Solicitud creada desde ${persistedTrip.origin.label} hacia ${persistedTrip.destination.label}`
   });
+  publishTripRealtime(persistedTrip, "trip_created");
+  publishTripTimelineRealtime(persistedTrip, "trip_requested", tripRequestedEvent);
   reply.status(201);
-  return trip;
+  return persistedTrip;
 });
 
 app.get("/trips/active", async (request, reply) => {
@@ -1384,18 +2036,20 @@ app.post<{ Body: CreateIncidentPayload }>("/incidents", async (request, reply) =
     status: "open"
   };
 
-  incidentsById.set(incident.id, incident);
-  await persistIncidents();
-  await createTripEvent({
+  const persistedIncident = await saveIncident(incident);
+  incidentsById.set(persistedIncident.id, persistedIncident);
+  const incidentEvent = await createTripEvent({
     tripId: trip.id,
     type: "incident_created",
-    occurredAt: incident.createdAt,
+    occurredAt: persistedIncident.createdAt,
     actorId: session.user.id,
     actorRole: session.user.role,
-    message: `Incidencia reportada por ${session.user.role}: ${incident.category}`
+    message: `Incidencia reportada por ${session.user.role}: ${persistedIncident.category}`
   });
+  publishTripRealtime(trip, "incident_created");
+  publishTripTimelineRealtime(trip, "incident_created", incidentEvent);
   reply.status(201);
-  return incident;
+  return persistedIncident;
 });
 
 app.post<{ Params: { tripId: string }; Body: CancelTripPayload }>(
@@ -1450,17 +2104,21 @@ app.post<{ Params: { tripId: string }; Body: CancelTripPayload }>(
       currentDriverLocation: undefined
     });
 
-    await persistTrips();
     if (cancelledTrip) {
-      await createTripEvent({
-        tripId: cancelledTrip.id,
+      const persistedTrip = await saveTrip(cancelledTrip);
+      tripsById.set(persistedTrip.id, persistedTrip);
+        const cancelledEvent = await createTripEvent({
+          tripId: persistedTrip.id,
         type: "trip_cancelled",
         occurredAt: new Date().toISOString(),
         actorId: session.user.id,
         actorRole: session.user.role,
-        message: `Viaje cancelado por ${session.user.role}`
-      });
-    }
+          message: `Viaje cancelado por ${session.user.role}`
+        });
+        publishTripRealtime(persistedTrip, "trip_cancelled");
+        publishTripTimelineRealtime(persistedTrip, "trip_cancelled", cancelledEvent);
+        return persistedTrip;
+      }
     return cancelledTrip;
   }
 );
@@ -1530,17 +2188,21 @@ app.post<{ Params: { tripId: string } }>(
       driverEtaMinutes: buildDriverEta("matched"),
       currentDriverLocation: buildDriverLocation(trip, "matched")
     });
-    await persistTrips();
     if (acceptedTrip) {
-      await createTripEvent({
-        tripId: acceptedTrip.id,
+      const persistedTrip = await saveTrip(acceptedTrip);
+      tripsById.set(persistedTrip.id, persistedTrip);
+        const matchedEvent = await createTripEvent({
+          tripId: persistedTrip.id,
         type: "trip_matched",
         occurredAt: new Date().toISOString(),
         actorId: session.user.id,
         actorRole: session.user.role,
-        message: `${session.user.fullName} acepto la solicitud`
-      });
-    }
+          message: `${session.user.fullName} acepto la solicitud`
+        });
+        publishTripRealtime(persistedTrip, "trip_matched");
+        publishTripTimelineRealtime(persistedTrip, "trip_matched", matchedEvent);
+        return persistedTrip;
+      }
     return acceptedTrip;
   }
 );
@@ -1604,8 +2266,9 @@ app.post<{ Params: { tripId: string }; Body: DriverTripStatusUpdate }>(
       driverEtaMinutes: buildDriverEta(nextStatus),
       currentDriverLocation: buildDriverLocation(trip, nextStatus)
     });
-    await persistTrips();
     if (updatedTrip) {
+      const persistedTrip = await saveTrip(updatedTrip);
+      tripsById.set(persistedTrip.id, persistedTrip);
       const eventType =
         nextStatus === "driver_en_route"
           ? "driver_assigned"
@@ -1615,51 +2278,76 @@ app.post<{ Params: { tripId: string }; Body: DriverTripStatusUpdate }>(
               ? "trip_started"
               : "trip_completed";
 
-      await createTripEvent({
-        tripId: updatedTrip.id,
+        const statusEvent = await createTripEvent({
+          tripId: persistedTrip.id,
         type: eventType,
         occurredAt: new Date().toISOString(),
         actorId: session.user.id,
         actorRole: session.user.role,
-        message: `Estado actualizado a ${nextStatus}`
-      });
-    }
+          message: `Estado actualizado a ${nextStatus}`
+        });
+        publishTripRealtime(persistedTrip, `trip_${nextStatus}`);
+        publishTripTimelineRealtime(persistedTrip, `trip_${nextStatus}`, statusEvent);
+        return persistedTrip;
+      }
     return updatedTrip;
   }
 );
 
+export const bootstrapApp = async () => {
+  if (isBootstrapped) {
+    return app;
+  }
+
+  if (!isTestRuntime) {
+    await realtimeHub.register(app);
+    supabaseRealtimeBridge.start();
+  }
+  app.addHook("onClose", async () => {
+    if (!isTestRuntime) {
+      await supabaseRealtimeBridge.close();
+    }
+    await realtimeHub.close();
+  });
+  await syncLocalDataToSupabase();
+
+  tripsById.clear();
+  incidentsById.clear();
+  tripEventsById.clear();
+  driverProfilesById.clear();
+  passengerProfilesById.clear();
+  promotionsById.clear();
+  businessAuditLog.length = 0;
+
+  const persistedBusinessRules = await readBusinessRules().catch(() => ({
+    pricing: DEFAULT_PRICING_CONFIG,
+    promotions: DEFAULT_PROMOTIONS,
+    auditLog: []
+  }));
+  hydrateBusinessState(persistedBusinessRules);
+  const persistedTrips = await readTrips();
+  for (const trip of persistedTrips) {
+    tripsById.set(trip.id, trip);
+  }
+  const persistedIncidents = await readIncidents();
+  for (const incident of persistedIncidents) {
+    incidentsById.set(incident.id, incident);
+  }
+  const persistedEvents = await readEvents();
+  for (const event of persistedEvents) {
+    tripEventsById.set(event.id, event);
+  }
+  hydrateDirectoryState(await readUsers());
+
+  isBootstrapped = true;
+  return app;
+};
+
+export { app };
+
 const start = async () => {
   try {
-    await syncLocalDataToSupabase();
-    const persistedBusinessRules = await readBusinessRules().catch(() => ({
-      pricing: DEFAULT_PRICING_CONFIG,
-      promotions: DEFAULT_PROMOTIONS,
-      auditLog: []
-    }));
-    pricingConfig = persistedBusinessRules.pricing;
-    for (const promotion of persistedBusinessRules.promotions) {
-      promotionsById.set(promotion.id, promotion);
-    }
-    businessAuditLog.push(...(persistedBusinessRules.auditLog ?? []));
-    const persistedTrips = await readTrips();
-    for (const trip of persistedTrips) {
-      tripsById.set(trip.id, trip);
-    }
-    const persistedIncidents = await readIncidents();
-    for (const incident of persistedIncidents) {
-      incidentsById.set(incident.id, incident);
-    }
-    const persistedEvents = await readEvents();
-    for (const event of persistedEvents) {
-      tripEventsById.set(event.id, event);
-    }
-    const persistedUsers = await readUsers();
-    for (const driver of persistedUsers.drivers) {
-      driverProfilesById.set(driver.id, driver);
-    }
-    for (const passenger of persistedUsers.passengers) {
-      passengerProfilesById.set(passenger.id, passenger);
-    }
+    await bootstrapApp();
     await app.listen({
       host: "0.0.0.0",
       port: 4000
@@ -1670,4 +2358,6 @@ const start = async () => {
   }
 };
 
-void start();
+if (process.argv[1] && import.meta.url === new URL(`file://${process.argv[1]}`).href) {
+  void start();
+}

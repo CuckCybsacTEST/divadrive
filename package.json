@@ -13,7 +13,7 @@
     "dev:mobile": "npm run build --workspace @diva-drive/domain && npm run dev --workspace @diva-drive/mobile",
     "dev:web": "npm run build --workspace @diva-drive/domain && npm run dev --workspace @diva-drive/web",
     "lint": "eslint .",
-    "typecheck": "npm run typecheck --workspace @diva-drive/domain && npm run typecheck --workspace @diva-drive/api && npm run typecheck --workspace @diva-drive/web && npm run typecheck --workspace @diva-drive/mobile"
+    "typecheck": "npm run build --workspace @diva-drive/domain && npm run typecheck --workspace @diva-drive/domain && npm run typecheck --workspace @diva-drive/api && npm run typecheck --workspace @diva-drive/web && npm run typecheck --workspace @diva-drive/mobile"
   },
   "devDependencies": {
     "@eslint/js": "10.0.1",
