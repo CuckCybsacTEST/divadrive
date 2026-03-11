@@ -864,6 +864,9 @@ export default function App() {
                 <p className="meta">{driver.phone}</p>
                 <p className="meta">Licencia: {driver.licenseNumber}</p>
                 <p className="meta">Vehiculo: {driver.vehicleDescription}</p>
+                <p className="meta">
+                  Disponibilidad: {driver.availabilityStatus ?? "offline"}
+                </p>
                 <div className="incidentActions">
                   {(["approved", "rejected"] as const).map((status) => (
                     <button

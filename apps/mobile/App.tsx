@@ -14,6 +14,7 @@ import {
 import MapView, { Marker, Polyline, PROVIDER_GOOGLE } from "react-native-maps";
 import * as Location from "expo-location";
 import {
+  type Coordinates,
   type DriverProfile,
   DEFAULT_HOME_BOOTSTRAP,
   DRIVER_STATUS_FLOW,
@@ -96,7 +97,30 @@ const sortTrips = (trips: RideTrip[]) =>
 const upsertTrip = (trips: RideTrip[], trip: RideTrip) =>
   sortTrips([trip, ...trips.filter((item) => item.id !== trip.id)]);
 
-const TERMINAL_TRIP_STATUSES = new Set<RideTrip["status"]>(["trip_completed", "cancelled"]);
+const TERMINAL_TRIP_STATUSES = new Set<RideTrip["status"]>([
+  "trip_completed",
+  "cancelled",
+  "expired"
+]);
+const isDriverOnline = (profile: DriverProfile | null) => profile?.availabilityStatus === "online";
+
+const getCurrentCoordinates = async (): Promise<Coordinates | null> => {
+  const permission = await Location.requestForegroundPermissionsAsync();
+
+  if (permission.status !== "granted") {
+    return null;
+  }
+
+  try {
+    const current = await Location.getCurrentPositionAsync({});
+    return {
+      latitude: current.coords.latitude,
+      longitude: current.coords.longitude
+    };
+  } catch {
+    return null;
+  }
+};
 
 export default function App() {
   const [authMode, setAuthMode] = useState<AuthMode>("sign_in");
@@ -675,7 +699,7 @@ export default function App() {
   };
 
   const handleAcceptTrip = async (tripId: string) => {
-    if (!session) {
+    if (!session || !isDriverOnline(driverProfile)) {
       return;
     }
 
@@ -699,7 +723,7 @@ export default function App() {
   };
 
   const handleAdvanceTrip = async () => {
-    if (!session || !activeTrip) {
+    if (!session || !activeTrip || !isDriverOnline(driverProfile)) {
       return;
     }
 
@@ -764,6 +788,52 @@ export default function App() {
         } satisfies CancelTripPayload)
       });
       setActiveTrip(null);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const handleDriverAvailabilityToggle = async () => {
+    if (
+      !session ||
+      session.user.role !== "driver" ||
+      !driverProfile ||
+      driverProfile.approvalStatus !== "approved"
+    ) {
+      return;
+    }
+
+    const nextAvailabilityStatus =
+      driverProfile.availabilityStatus === "online" ? "offline" : "online";
+    const currentLocation =
+      nextAvailabilityStatus === "online" ? await getCurrentCoordinates() : undefined;
+
+    setLoading(true);
+    try {
+      const nextProfile = await apiWithSession<DriverProfile>("/driver/availability", {
+        method: "POST",
+        body: JSON.stringify({
+          availabilityStatus: nextAvailabilityStatus,
+          currentLocation
+        })
+      });
+      setDriverProfile(nextProfile);
+      setDriverHome((current) =>
+        current
+          ? {
+              ...current,
+              driverProfile: nextProfile,
+              queueSize: nextProfile.availabilityStatus === "online" ? current.queueSize : 0
+            }
+          : current
+      );
+      if (nextProfile.availabilityStatus !== "online") {
+        setDriverQueue([]);
+      } else if (session) {
+        await Promise.all([loadDriverHome(session), loadDriverQueue(session)]);
+      }
+    } catch {
+      Alert.alert("No pudimos actualizar tu disponibilidad", "Intenta nuevamente.");
     } finally {
       setLoading(false);
     }
@@ -1074,6 +1144,20 @@ export default function App() {
                 <Text style={styles.muted}>
                   Aprobacion: {driverProfile?.approvalStatus ?? "sin perfil"}
                 </Text>
+                <Text style={styles.muted}>
+                  Disponibilidad: {driverProfile?.availabilityStatus ?? "offline"}
+                </Text>
+                <Pressable
+                  onPress={handleDriverAvailabilityToggle}
+                  style={[
+                    styles.altButton,
+                    driverProfile?.approvalStatus !== "approved" && styles.disabledButton
+                  ]}
+                >
+                  <Text style={styles.altButtonText}>
+                    {isDriverOnline(driverProfile) ? "Ponerme offline" : "Ponerme online"}
+                  </Text>
+                </Pressable>
               </View>
               {driverProfile ? (
                 <View style={styles.card}>
@@ -1083,6 +1167,9 @@ export default function App() {
                   <Text style={styles.muted}>Vehiculo: {driverProfile.vehicleDescription}</Text>
                   <Text style={styles.muted}>
                     Estado: {driverProfile.approvalStatus}
+                  </Text>
+                  <Text style={styles.muted}>
+                    Disponibilidad: {driverProfile.availabilityStatus ?? "offline"}
                   </Text>
                 </View>
               ) : null}
@@ -1120,7 +1207,11 @@ export default function App() {
                 <View style={styles.card}>
                   <Text style={styles.heading}>Solicitudes pendientes</Text>
                   {driverQueue.length === 0 ? (
-                    <Text style={styles.muted}>No hay solicitudes nuevas.</Text>
+                    <Text style={styles.muted}>
+                      {isDriverOnline(driverProfile)
+                        ? "No hay solicitudes nuevas."
+                        : "Ponte online para recibir solicitudes."}
+                    </Text>
                   ) : (
                     driverQueue.map((trip) => (
                       <View key={trip.id} style={styles.choice}>
@@ -1133,7 +1224,9 @@ export default function App() {
                           onPress={() => handleAcceptTrip(trip.id)}
                           style={[
                             styles.button,
-                            driverProfile?.approvalStatus !== "approved" && styles.disabledButton
+                            (driverProfile?.approvalStatus !== "approved" ||
+                              !isDriverOnline(driverProfile)) &&
+                              styles.disabledButton
                           ]}
                         >
                           <Text style={styles.buttonText}>Aceptar solicitud</Text>

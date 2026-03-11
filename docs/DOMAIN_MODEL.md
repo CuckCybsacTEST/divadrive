@@ -93,5 +93,19 @@ El matching inicial debe considerar como minimo:
 - ausencia de viaje activo incompatible
 - zona operativa permitida
 
+## Estado operativo implementado
+Actualmente el dominio implementado ya cubre:
+
+- estado `online/offline` de conductora
+- ultima ubicacion conocida de conductora para priorizacion operativa
+- expiracion de solicitudes en `requested`
+- reserva temporal de solicitud para una conductora especifica antes de aceptacion definitiva
+
+Todavia no esta completamente implementado:
+
+- validacion real por zona operativa
+- rechazo/filtrado por politicas geograficas duras
+- asignacion automatica mas fuerte que la cola reservada actual
+
 ## Auditoria
 Todo cambio de estado y toda accion administrativa relevante debe generar `AuditEvent`.

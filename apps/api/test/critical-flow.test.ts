@@ -173,6 +173,17 @@ test("critical flow covers auth, approval, trip lifecycle and incident resolutio
   assert.equal(approval.statusCode, 200);
   assert.equal(approval.body.approvalStatus, "approved");
 
+  const driverOnline = await request<{ availabilityStatus: string }>(server, {
+    method: "POST",
+    url: "/driver/availability",
+    token: driverSignUp.body.accessToken,
+    payload: {
+      availabilityStatus: "online"
+    }
+  });
+  assert.equal(driverOnline.statusCode, 200);
+  assert.equal(driverOnline.body.availabilityStatus, "online");
+
   const tripCreate = await request<{
     id: string;
     status: string;
@@ -405,6 +416,26 @@ test("authorization and transition guards reject invalid actors and invalid stat
   });
   assert.equal(approveDriver.statusCode, 200);
 
+  const offlineAcceptDenied = await request<{ error: string }>(server, {
+    method: "POST",
+    url: `/driver/trips/${tripCreate.body.id}/accept`,
+    token: unapprovedDriver.body.accessToken,
+    payload: {}
+  });
+  assert.equal(offlineAcceptDenied.statusCode, 403);
+  assert.equal(offlineAcceptDenied.body.error, "driver_offline");
+
+  const goOnline = await request<{ availabilityStatus: string }>(server, {
+    method: "POST",
+    url: "/driver/availability",
+    token: unapprovedDriver.body.accessToken,
+    payload: {
+      availabilityStatus: "online"
+    }
+  });
+  assert.equal(goOnline.statusCode, 200);
+  assert.equal(goOnline.body.availabilityStatus, "online");
+
   const acceptedTrip = await request<{ status: string }>(server, {
     method: "POST",
     url: `/driver/trips/${tripCreate.body.id}/accept`,
@@ -509,7 +540,7 @@ test("business endpoints persist pricing, promotions and audit trail", async (t)
     token: operator.body.accessToken,
     payload: {
       name: "Promo Business Test",
-      code: `BIZ${stamp.slice(-4)}`,
+      code: `BIZ${stamp.replace(/[^0-9]/g, "").slice(-10)}`,
       kind: "flat",
       audience: "all",
       applyMode: "code",

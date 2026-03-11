@@ -11,6 +11,7 @@ Definir politicas operativas minimas que impactan el producto y la implementacio
 ## Zonas operativas
 - la empresa define zonas habilitadas
 - el sistema debe poder restringir solicitud o asignacion fuera de zona
+- esta politica sigue pendiente de implementacion operativa real en el codigo
 
 ## Incidencias
 - pasajero, conductora y empresa pueden registrar incidencias
@@ -25,6 +26,13 @@ Definir politicas operativas minimas que impactan el producto y la implementacio
 - deben existir causales configurables
 - la empresa puede intervenir en cancelaciones excepcionales
 - las reglas comerciales o penalidades no pueden quedar hardcodeadas en clientes
+
+## Estado operativo actual
+- una conductora no aprobada no puede ponerse `online`
+- una conductora `offline` no puede aceptar viajes
+- una solicitud no atendida expira automaticamente dentro de la ventana operativa actual
+- la cola visible para conductoras se prioriza por proximidad y aplica una reserva temporal para reducir competencia simultanea
+- las reglas de zona y politicas avanzadas de asignacion siguen pendientes antes de cualquier salida productiva
 
 ## Privacidad y datos sensibles
 - la documentacion de conductoras debe almacenarse de forma segura

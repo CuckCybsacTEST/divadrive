@@ -3,7 +3,19 @@
 Repositorio base de DIVA DRIVE, una plataforma de movilidad urbana con foco en seguridad, conductoras mujeres y operacion empresarial controlable.
 
 ## Estado actual
-Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base documental, cerrar decisiones de arquitectura y preparar la estructura para desarrollo incremental.
+El repositorio ya supero la base documental inicial y hoy se encuentra en un **MVP operativo temprano**.
+
+Actualmente existe un flujo funcional end-to-end para:
+
+- autenticacion con Supabase Auth desde el API
+- solicitud de viaje por pasajero
+- aceptacion y avance manual del viaje por conductora
+- tracking basico, historial, timeline e incidencias
+- panel web operativo para supervision, directorio, pricing y promociones
+- persistencia Supabase-first con fallback local para desarrollo
+- realtime del API hacia `web` y `mobile`
+
+Todavia no debe considerarse listo para produccion real. La prioridad actual es cerrar brechas del MVP, modularizar mejor el backend y endurecer la operacion.
 
 ## Estructura tecnica inicial
 - `apps/api`: backend operacional con Fastify y TypeScript
@@ -42,6 +54,32 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - persistencia Supabase-first para usuarios, viajes, incidencias, eventos y reglas comerciales
 - sesiones persistidas y lecturas live de viajes/eventos/incidencias desde el API
 
+## Lo ya cubierto del MVP
+- pasajero con mapa, origen/destino, estimacion, solicitud, historial e incidencias
+- conductora con onboarding basico, cola de solicitudes, aceptacion y avance manual del viaje
+- empresa con panel de viajes, incidencias, directorio, pricing, promociones y auditoria comercial
+- contratos compartidos de dominio para estados, eventos, sesiones y reglas comerciales
+- base realtime sobre WebSocket propio y bridge con Supabase Realtime
+
+## Brechas actuales del MVP
+- reglas reales por zona operativa
+- ingresos basicos para conductora
+- reserva/asignacion mas robusta para evitar competencia simultanea sobre una misma solicitud
+- desacoplar totalmente el write-path restante del fallback local hacia persistencia live consistente
+- observabilidad y pipeline CI antes de cualquier salida productiva
+
+## Estado operativo real
+Operativamente, la plataforma ya puede sostener un ciclo principal de servicio bajo supervision interna:
+
+- pasajero autenticado puede estimar, solicitar, cancelar y seguir un viaje
+- conductora aprobada puede ponerse `online`, recibir cola elegible, aceptar y avanzar estados
+- solicitudes no tomadas expiran automaticamente
+- la cola de conductora se prioriza por proximidad segun ultima ubicacion conocida
+- existe una ventana corta de reserva para evitar que dos conductoras compitan por la misma solicitud al mismo tiempo
+- operaciones puede intervenir sobre conductoras, incidencias, pricing, promociones y monitoreo
+
+No esta lista todavia para una operacion comercial real en calle. Lo pendiente ya no es el flujo basico, sino endurecimiento operativo, reglas de zona, persistencia mas consistente y expansion de capacidades empresariales.
+
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
 - `VISION_AND_SCOPE.md`
@@ -66,4 +104,7 @@ Este repositorio inicia en Fase 0. La prioridad actual es consolidar la base doc
 - tareas pequenas, verificables y versionables
 
 ## Siguiente paso recomendado
-Cerrar `auth` menos demo con Supabase Auth y empezar a reemplazar el write-path restante del API por repositorios live.
+1. terminar de mover el write-path restante del API a repositorios live sobre Supabase
+2. implementar reglas reales por zona operativa y elegibilidad geografica
+3. agregar ingresos basicos y vista operativa para conductora
+4. endurecer matching/reserva hacia una asignacion mas robusta

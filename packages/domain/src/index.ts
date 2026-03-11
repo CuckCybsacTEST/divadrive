@@ -78,6 +78,7 @@ export interface SessionUser {
 }
 
 export type DriverApprovalStatus = "pending" | "approved" | "rejected";
+export type DriverAvailabilityStatus = "offline" | "online";
 
 export interface DriverProfile {
   id: string;
@@ -85,6 +86,9 @@ export interface DriverProfile {
   phone: string;
   city: string;
   approvalStatus: DriverApprovalStatus;
+  availabilityStatus?: DriverAvailabilityStatus;
+  lastKnownLocation?: Coordinates;
+  lastLocationAt?: string;
   documentsSubmitted: boolean;
   licenseNumber: string;
   vehicleDescription: string;
@@ -254,7 +258,32 @@ export type ActiveTripStatus = Extract<
   | "trip_started"
   | "trip_completed"
   | "cancelled"
+  | "expired"
 >;
+
+export const TRIP_REQUEST_TTL_MS = 90_000;
+export const TRIP_RESERVATION_TTL_MS = 20_000;
+
+export const getTripRequestExpiresAt = (requestedAt: string) =>
+  new Date(new Date(requestedAt).getTime() + TRIP_REQUEST_TTL_MS).toISOString();
+
+export const isTripRequestExpired = (
+  trip: Pick<RideTrip, "requestedAt" | "status">,
+  now = Date.now()
+) => trip.status === "requested" && new Date(trip.requestedAt).getTime() + TRIP_REQUEST_TTL_MS <= now;
+
+export const isTripReservationActive = (
+  trip: Pick<RideTrip, "reservedDriverId" | "reservedUntil">,
+  now = Date.now()
+) =>
+  Boolean(
+    trip.reservedDriverId &&
+      trip.reservedUntil &&
+      new Date(trip.reservedUntil).getTime() > now
+  );
+
+export const getTripReservationExpiresAt = (now = Date.now()) =>
+  new Date(now + TRIP_RESERVATION_TTL_MS).toISOString();
 
 export interface RideTrip {
   id: string;
@@ -273,6 +302,10 @@ export interface RideTrip {
   cancelledByRole?: IncidentReporterRole;
   cancelledAt?: string;
   requestedPromoCode?: string;
+  expiresAt?: string;
+  reservedDriverId?: string;
+  reservedAt?: string;
+  reservedUntil?: string;
 }
 
 export interface CreateTripRequest extends RideEstimateRequest {
@@ -354,6 +387,11 @@ export interface AdminDirectorySnapshot {
 
 export interface DriverApprovalUpdate {
   approvalStatus: DriverApprovalStatus;
+}
+
+export interface DriverAvailabilityUpdate {
+  availabilityStatus: DriverAvailabilityStatus;
+  currentLocation?: Coordinates;
 }
 
 export interface PricingConfigUpdate {

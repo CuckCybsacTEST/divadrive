@@ -7,7 +7,7 @@
 Plataforma de movilidad urbana con enfoque en seguridad, confianza y operacion profesional, donde las conductoras son exclusivamente mujeres y los pasajeros pueden ser hombres o mujeres.
 
 ## Estado del proyecto
-Proyecto real en fase de definicion estrategica, arquitectura base y planificacion de ejecucion tecnica.
+Proyecto real en fase de **MVP operativo temprano**. La base documental inicial ya fue superada por una implementacion funcional de backend, app movil y panel web, aunque todavia no esta lista para salida productiva formal.
 
 ## Naturaleza del proyecto
 DIVA DRIVE no se plantea como una demo ni como un clon basico de aplicacion de taxis. Se plantea como una plataforma completa, escalable y preparada para produccion, compuesta por aplicaciones moviles, backend operacional, paneles administrativos y modulos flexibles de negocio.
@@ -76,3 +76,17 @@ Para evitar ambiguedad al arrancar, se asumen estas definiciones iniciales hasta
 
 ## Resultado esperado
 Una base de software real, mantenible y ampliable, apta para ser construida paso a paso en repositorio versionado y utilizada tanto como proyecto productivo como material de formacion tecnica interna.
+
+## Estado operativo actual
+Actualmente el repositorio ya ofrece:
+
+- autenticacion y sesiones desde backend
+- flujo principal de viaje extremo a extremo bajo supervision
+- onboarding y aprobacion operativa de conductoras
+- cambio `online/offline` de conductora
+- expiracion automatica de solicitudes no atendidas
+- cola de solicitudes priorizada por proximidad
+- reserva temporal de solicitudes para reducir competencia simultanea
+- panel operativo con viajes, incidencias, directorio, pricing y promociones
+
+Las brechas principales ya no estan en el esqueleto del producto, sino en endurecimiento operativo: zonas, ingresos, persistencia plenamente consistente, observabilidad y reglas mas fuertes de asignacion.
