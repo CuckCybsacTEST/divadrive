@@ -4,6 +4,7 @@ import type {
   AuthSession,
   BusinessAuditEntry,
   DriverProfile,
+  OperationalZone,
   PricingConfig,
   Promotion,
   RealtimeEnvelope,
@@ -43,7 +44,19 @@ const basePricing: PricingConfig = {
   perMinuteRate: 0.4,
   minimumFare: 12,
   serviceFee: 1.5,
-  surgeMultiplier: 1
+  surgeMultiplier: 1,
+  driverPayoutRate: 0.82
+};
+
+const defaultOperationalZone: OperationalZone = {
+  id: "lima-central",
+  name: "Lima Metropolitana",
+  center: {
+    latitude: -12.0464,
+    longitude: -77.0428
+  },
+  radiusKm: 18,
+  isActive: true
 };
 
 const passengerSession: AuthSession = {
@@ -145,6 +158,7 @@ const buildTimelineEvent = (
 
 test("business service hydrates state, appends audit and applies the best eligible promotion", async () => {
   let currentPricing = { ...basePricing };
+  let currentOperationalZones: OperationalZone[] = [];
   const businessAuditLog: BusinessAuditEntry[] = [];
   const promotionsById = new Map<string, Promotion>();
   const tripRepository = createTripRepositoryDouble({
@@ -152,6 +166,11 @@ test("business service hydrates state, appends audit and applies the best eligib
   });
   const businessRepository = createBusinessRepositoryDouble(basePricing, {
     getPricingConfig: () => currentPricing,
+    getOperationalZones: () => currentOperationalZones,
+    cacheOperationalZones: (zones) => {
+      currentOperationalZones = [...zones];
+      return zones;
+    },
     cachePricingConfig: (pricingConfig) => {
       currentPricing = pricingConfig;
       return pricingConfig;
@@ -166,6 +185,7 @@ test("business service hydrates state, appends audit and applies the best eligib
     },
     hydrateSnapshot: (snapshot) => {
       currentPricing = snapshot.pricing;
+      currentOperationalZones = [...snapshot.operationalZones];
       promotionsById.clear();
       for (const promotion of snapshot.promotions) {
         promotionsById.set(promotion.id, promotion);
@@ -174,6 +194,7 @@ test("business service hydrates state, appends audit and applies the best eligib
       businessAuditLog.push(...snapshot.auditLog);
       return {
         pricing: currentPricing,
+        operationalZones: snapshot.operationalZones,
         promotions: Array.from(promotionsById.values()).sort((a, b) =>
           b.createdAt.localeCompare(a.createdAt)
         ),
@@ -182,7 +203,8 @@ test("business service hydrates state, appends audit and applies the best eligib
     },
     listPromotions: () =>
       Array.from(promotionsById.values()).sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
-    listBusinessAuditEntries: () => [...businessAuditLog]
+    listBusinessAuditEntries: () => [...businessAuditLog],
+    listOperationalZones: () => [...currentOperationalZones]
   });
 
   const service = createBusinessService({
@@ -204,10 +226,12 @@ test("business service hydrates state, appends audit and applies the best eligib
         createdAt: "2026-03-11T11:00:00.000Z"
       })
     ],
+    operationalZones: [defaultOperationalZone],
     auditLog: []
   });
 
   assert.equal(snapshot.pricing.surgeMultiplier, 1.3);
+  assert.equal(snapshot.operationalZones[0]?.id, defaultOperationalZone.id);
   assert.equal(snapshot.promotions[0]?.id, "promo-2");
 
   const auditEntry = service.appendBusinessAudit(
@@ -231,6 +255,7 @@ test("business service hydrates state, appends audit and applies the best eligib
   assert.ok(estimate.fareBreakdown.discountAmount > 0);
   assert.equal(estimate.route.points.length, 6);
   assert.equal(estimate.estimatedFare, estimate.fareBreakdown.total);
+  assert.equal(service.resolveOperationalZone(origin, destination)?.id, defaultOperationalZone.id);
 });
 
 test("trip service resolves cache, creates timeline events and personalizes driver notifications", async () => {
@@ -240,6 +265,22 @@ test("trip service resolves cache, creates timeline events and personalizes driv
     status: "matched",
     driverId: driverSession.user.id,
     driverName: driverSession.user.fullName
+  });
+  const completedTrip = buildTrip({
+    id: "trip-completed",
+    status: "trip_completed",
+    driverId: driverSession.user.id,
+    driverName: driverSession.user.fullName,
+    estimate: {
+      ...buildTrip().estimate,
+      estimatedFare: 32,
+      fareBreakdown: {
+        subtotal: 30,
+        serviceFee: 2,
+        discountAmount: 0,
+        total: 32
+      }
+    }
   });
   const eventStore = [
     buildTimelineEvent({}, "2026-03-11T10:10:00.000Z"),
@@ -267,8 +308,8 @@ test("trip service resolves cache, creates timeline events and personalizes driv
     },
     listEventsByTrip: async () => eventStore,
     listRecentEvents: async () => eventStore,
-    listTrips: async () => [persistedTrip],
-    listTripsByDriver: async () => [persistedTrip],
+    listTrips: async () => [persistedTrip, completedTrip],
+    listTripsByDriver: async () => [persistedTrip, completedTrip],
     listTripsByPassenger: async () => [persistedTrip],
     listTripsByStatus: async () => [persistedTrip],
     patchCachedTrip: (tripId, patch) => {
@@ -283,6 +324,8 @@ test("trip service resolves cache, creates timeline events and personalizes driv
   });
 
   const service = createTripService({
+    getOperationalZones: () => [defaultOperationalZone],
+    getPricingConfig: () => basePricing,
     directoryRepository,
     tripRepository
   });
@@ -316,6 +359,10 @@ test("trip service resolves cache, creates timeline events and personalizes driv
   assert.equal(notifications.length, 3);
   assert.equal(notifications[0]?.level, "warning");
   assert.match(notifications[2]?.message ?? "", /^Tu actualizacion:/);
+
+  const earnings = await service.getDriverEarnings(driverSession.user.id);
+  assert.equal(earnings.completedTrips, 1);
+  assert.equal(earnings.grossEarnings, completedTrip.estimate.estimatedFare);
 });
 
 test("trip service expires stale requested trips and emits a timeline event", async () => {
@@ -329,6 +376,8 @@ test("trip service expires stale requested trips and emits a timeline event", as
   const savedEvents: TripTimelineEvent[] = [];
 
   const service = createTripService({
+    getOperationalZones: () => [defaultOperationalZone],
+    getPricingConfig: () => basePricing,
     directoryRepository: createDirectoryRepositoryDouble(),
     tripRepository: createTripRepositoryDouble({
       listTripsByStatus: async () => [staleTrip],
@@ -383,6 +432,8 @@ test("driver queue is ordered by proximity when the driver has a last known loca
   );
 
   const service = createTripService({
+    getOperationalZones: () => [defaultOperationalZone],
+    getPricingConfig: () => basePricing,
     directoryRepository: createDirectoryRepositoryDouble({
       getDriverProfileById: async () => ({
         ...driverProfile,
@@ -407,9 +458,10 @@ test("driver queue is ordered by proximity when the driver has a last known loca
 
   const queue = await service.getDriverQueue(driverProfile.id);
 
-  assert.equal(queue[0]?.id, "trip-near");
-  assert.equal(queue[1]?.id, "trip-far");
-  assert.equal(queue[0]?.reservedDriverId, driverProfile.id);
+  assert.equal(queue.trips.length, 1);
+  assert.equal(queue.trips[0]?.id, "trip-near");
+  assert.equal(queue.trips[0]?.reservedDriverId, driverProfile.id);
+  assert.equal(queue.reassignedOffers.length, 0);
 });
 
 test("driver queue hides trips reserved for another driver during the reservation window", async () => {
@@ -422,6 +474,8 @@ test("driver queue hides trips reserved for another driver during the reservatio
     mutableTrips.find((trip) => trip.id === tripId) ?? null;
 
   const service = createTripService({
+    getOperationalZones: () => [defaultOperationalZone],
+    getPricingConfig: () => basePricing,
     directoryRepository: createDirectoryRepositoryDouble({
       getDriverProfileById: async (driverId) => ({
         ...driverProfile,
@@ -461,9 +515,144 @@ test("driver queue hides trips reserved for another driver during the reservatio
   const firstDriverQueue = await service.getDriverQueue("driver-1");
   const secondDriverQueue = await service.getDriverQueue("driver-2");
 
-  assert.equal(firstDriverQueue.length, 1);
+  assert.equal(firstDriverQueue.trips.length, 1);
   assert.equal(mutableTrips[0]?.reservedDriverId, "driver-1");
-  assert.equal(secondDriverQueue.length, 0);
+  assert.equal(secondDriverQueue.trips.length, 0);
+  assert.equal(secondDriverQueue.reassignedOffers.length, 0);
+});
+
+test("expired reservation escalates to the next eligible driver and recycles after exhaustion", async () => {
+  const now = Date.now();
+  let mutableTrip = buildTrip({
+    id: "trip-escalation",
+    requestedAt: new Date(now - 5_000).toISOString(),
+    reservedDriverId: "driver-1",
+    reservedAt: new Date(now - 30_000).toISOString(),
+    reservedUntil: new Date(now - 10_000).toISOString(),
+    offeredDriverIds: ["driver-1"]
+  });
+  const driverOne = {
+    ...driverProfile,
+    id: "driver-1",
+    approvalStatus: "approved" as const,
+    availabilityStatus: "online" as const,
+    lastKnownLocation: {
+      latitude: -12.1317,
+      longitude: -77.0301
+    }
+  };
+  const driverTwo = {
+    ...driverProfile,
+    id: "driver-2",
+    approvalStatus: "approved" as const,
+    availabilityStatus: "online" as const,
+    lastKnownLocation: {
+      latitude: -12.13175,
+      longitude: -77.03015
+    }
+  };
+
+  const service = createTripService({
+    getOperationalZones: () => [defaultOperationalZone],
+    getPricingConfig: () => basePricing,
+    directoryRepository: createDirectoryRepositoryDouble({
+      getDriverProfileById: async (driverId) =>
+        [driverOne, driverTwo].find((driver) => driver.id === driverId) ?? null,
+      listDriverProfiles: async () => [driverOne, driverTwo]
+    }),
+    tripRepository: createTripRepositoryDouble({
+      getTripById: async () => mutableTrip,
+      listTripsByStatus: async (status) => (mutableTrip.status === status ? [mutableTrip] : []),
+      saveTrip: async (trip) => {
+        mutableTrip = trip;
+        return trip;
+      },
+      patchCachedTrip: (_tripId, patch) => ({
+        ...mutableTrip,
+        ...patch
+      })
+    })
+  });
+
+  const firstDriverQueue = await service.getDriverQueue("driver-1");
+  assert.equal(firstDriverQueue.trips.length, 0);
+
+  const secondDriverQueue = await service.getDriverQueue("driver-2");
+  assert.equal(secondDriverQueue.trips.length, 1);
+  assert.equal(secondDriverQueue.trips[0]?.reservedDriverId, "driver-2");
+  assert.deepEqual(secondDriverQueue.trips[0]?.offeredDriverIds, ["driver-1", "driver-2"]);
+  assert.equal(secondDriverQueue.reassignedOffers.length, 1);
+  assert.equal(secondDriverQueue.reassignedOffers[0]?.timelineEvent.type, "trip_offer_reassigned");
+
+  mutableTrip = {
+    ...mutableTrip,
+    reservedDriverId: "driver-2",
+    reservedAt: new Date(now - 25_000).toISOString(),
+    reservedUntil: new Date(now - 5_000).toISOString()
+  };
+
+  const recycledQueue = await service.getDriverQueue("driver-1");
+  assert.equal(recycledQueue.trips.length, 1);
+  assert.equal(recycledQueue.trips[0]?.reservedDriverId, "driver-1");
+  assert.deepEqual(recycledQueue.trips[0]?.offeredDriverIds, ["driver-1"]);
+  assert.equal(recycledQueue.reassignedOffers.length, 0);
+});
+
+test("driver queue excludes trips outside the driver's operational zone", async () => {
+  const freshRequestedAt = new Date().toISOString();
+  const inZoneTrip = buildTrip({
+    id: "trip-in-zone",
+    requestedAt: freshRequestedAt,
+    operationalZoneId: defaultOperationalZone.id
+  });
+  const outOfZoneTrip = buildTrip({
+    id: "trip-out-zone",
+    requestedAt: freshRequestedAt,
+    operationalZoneId: "callao-norte"
+  });
+
+  const service = createTripService({
+    getOperationalZones: () => [
+      defaultOperationalZone,
+      {
+        id: "callao-norte",
+        name: "Callao Norte",
+        center: {
+          latitude: -11.98,
+          longitude: -77.15
+        },
+        radiusKm: 5,
+        isActive: true
+      }
+    ],
+    getPricingConfig: () => basePricing,
+    directoryRepository: createDirectoryRepositoryDouble({
+      getDriverProfileById: async () => ({
+        ...driverProfile,
+        availabilityStatus: "online",
+        lastKnownLocation: {
+          latitude: -12.1317,
+          longitude: -77.0301
+        }
+      })
+    }),
+    tripRepository: createTripRepositoryDouble({
+      getTripById: async (tripId) =>
+        [inZoneTrip, outOfZoneTrip].find((trip) => trip.id === tripId) ?? null,
+      listTripsByStatus: async (status) =>
+        [inZoneTrip, outOfZoneTrip].filter((trip) => trip.status === status),
+      saveTrip: async (trip) => trip,
+      patchCachedTrip: (tripId, patch) => ({
+        ...([inZoneTrip, outOfZoneTrip].find((trip) => trip.id === tripId) as RideTrip),
+        ...patch
+      })
+    })
+  });
+
+  const queue = await service.getDriverQueue(driverProfile.id);
+
+  assert.equal(queue.trips.length, 1);
+  assert.equal(queue.trips[0]?.id, "trip-in-zone");
 });
 
 test("ops service computes dashboard totals and commercial metrics from trip and incident state", async () => {
@@ -495,6 +684,8 @@ test("ops service computes dashboard totals and commercial metrics from trip and
       id: "trip-active",
       status: "driver_en_route",
       driverId: "driver-1",
+      operationalZoneId: defaultOperationalZone.id,
+      offeredDriverIds: ["driver-1", "driver-2"],
       estimate: {
         ...buildTrip().estimate,
         fareBreakdown: {
@@ -525,6 +716,46 @@ test("ops service computes dashboard totals and commercial metrics from trip and
     },
     "2026-03-11T09:00:00.000Z"
   );
+  const reservedTrip = buildTrip(
+    {
+      id: "trip-reserved",
+      status: "requested",
+      operationalZoneId: defaultOperationalZone.id,
+      reservedDriverId: "driver-2",
+      reservedAt: new Date(Date.now() - 5_000).toISOString(),
+      reservedUntil: new Date(Date.now() + 60_000).toISOString(),
+      offeredDriverIds: ["driver-1", "driver-2"],
+      estimate: {
+        ...buildTrip().estimate,
+        fareBreakdown: {
+          subtotal: 22,
+          serviceFee: 1.5,
+          discountAmount: 0,
+          total: 23.5
+        },
+        estimatedFare: 23.5
+      }
+    },
+    new Date().toISOString()
+  );
+  const expiredTrip = buildTrip(
+    {
+      id: "trip-expired",
+      status: "expired",
+      operationalZoneId: defaultOperationalZone.id,
+      estimate: {
+        ...buildTrip().estimate,
+        fareBreakdown: {
+          subtotal: 22,
+          serviceFee: 1.5,
+          discountAmount: 0,
+          total: 23.5
+        },
+        estimatedFare: 23.5
+      }
+    },
+    "2026-03-11T08:00:00.000Z"
+  );
   const incidents: TripIncident[] = [
     {
       id: "incident-open",
@@ -549,16 +780,82 @@ test("ops service computes dashboard totals and commercial metrics from trip and
       status: "resolved"
     }
   ];
+  const eventsByTripId = new Map<string, TripTimelineEvent[]>([
+    [
+      completedTrip.id,
+      [
+        buildTimelineEvent(
+          {
+            id: "event-match-completed",
+            tripId: completedTrip.id,
+            type: "trip_matched",
+            occurredAt: "2026-03-11T11:01:00.000Z",
+            message: "Match completado"
+          },
+          "2026-03-11T11:01:00.000Z"
+        )
+      ]
+    ],
+    [
+      activeTrip.id,
+      [
+        buildTimelineEvent(
+          {
+            id: "event-reassigned",
+            tripId: activeTrip.id,
+            type: "trip_offer_reassigned",
+            occurredAt: "2026-03-11T12:00:20.000Z",
+            message: "Oferta reasignada"
+          },
+          "2026-03-11T12:00:20.000Z"
+        ),
+        buildTimelineEvent(
+          {
+            id: "event-match-active",
+            tripId: activeTrip.id,
+            type: "trip_matched",
+            occurredAt: "2026-03-11T12:01:30.000Z",
+            message: "Match activo"
+          },
+          "2026-03-11T12:01:30.000Z"
+        )
+      ]
+    ]
+  ]);
 
   const service = createOpsService({
+    businessRepository: createBusinessRepositoryDouble(basePricing, {
+      listOperationalZones: () => [defaultOperationalZone]
+    }),
+    directoryRepository: createDirectoryRepositoryDouble({
+      listDriverProfiles: async () => [
+        {
+          ...driverProfile,
+          id: "driver-1",
+          fullName: "Conductora Uno",
+          approvalStatus: "approved",
+          availabilityStatus: "online"
+        },
+        {
+          ...driverProfile,
+          id: "driver-2",
+          fullName: "Conductora Dos",
+          approvalStatus: "approved",
+          availabilityStatus: "online"
+        }
+      ]
+    }),
     tripRepository: createTripRepositoryDouble({
       listIncidents: async () => incidents,
+      listEventsByTrip: async (tripId) => eventsByTripId.get(tripId) ?? [],
       listRecentEvents: async () => [buildTimelineEvent()],
-      listTrips: async () => [activeTrip, completedTrip, cancelledTrip],
+      listTrips: async () => [activeTrip, completedTrip, cancelledTrip, reservedTrip, expiredTrip],
       listTripsByDriver: async () => [activeTrip],
       listTripsByPassenger: async () => [activeTrip, completedTrip, cancelledTrip],
       listTripsByStatus: async (status) =>
-        [completedTrip, activeTrip, cancelledTrip].filter((trip) => trip.status === status)
+        [completedTrip, activeTrip, cancelledTrip, reservedTrip, expiredTrip].filter(
+          (trip) => trip.status === status
+        )
     })
   });
 
@@ -572,6 +869,19 @@ test("ops service computes dashboard totals and commercial metrics from trip and
   assert.equal(metrics.totalRevenue, 32);
   assert.equal(metrics.totalDiscountAmount, 5);
   assert.equal(metrics.averageCompletedFare, 32);
+  assert.equal(metrics.matchedTrips, 2);
+  assert.equal(metrics.expiredRequests, 1);
+  assert.equal(metrics.pendingReservedTrips, 1);
+  assert.equal(metrics.reassignedOffers, 1);
+  assert.equal(metrics.averageSecondsToMatch, 75);
+  assert.equal(metrics.zoneHealth[0]?.zoneId, defaultOperationalZone.id);
+  assert.equal(metrics.zoneHealth[0]?.expiredRequests, 1);
+  assert.ok(metrics.driverAttention.some((driver) => driver.driverId === "driver-1"));
+  assert.ok(metrics.driverAttention.some((driver) => driver.driverId === "driver-2"));
+  assert.equal(
+    metrics.driverAttention.find((driver) => driver.driverId === "driver-2")?.activeReservations,
+    1
+  );
   assert.equal(metrics.promoPerformance[0]?.code, "DIVA10");
 
   const events = await service.getOpsEventStream();

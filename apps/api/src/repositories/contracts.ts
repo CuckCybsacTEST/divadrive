@@ -3,6 +3,7 @@ import type {
   BusinessAuditEntry,
   BusinessRulesSnapshot,
   DriverProfile,
+  OperationalZone,
   PassengerProfile,
   PricingConfig,
   Promotion,
@@ -45,13 +46,17 @@ export interface DirectoryRepository {
 export interface BusinessRepository {
   appendBusinessAuditEntry(entry: BusinessAuditEntry): Promise<BusinessAuditEntry>;
   cacheBusinessAuditEntry(entry: BusinessAuditEntry): BusinessAuditEntry;
+  cacheOperationalZones(zones: OperationalZone[]): OperationalZone[];
   cachePricingConfig(config: PricingConfig): PricingConfig;
   cachePromotion(promotion: Promotion): Promotion;
+  getOperationalZones(): OperationalZone[];
   getPricingConfig(): PricingConfig;
   getSnapshot(): BusinessRulesSnapshot;
   hydrateSnapshot(snapshot: BusinessRulesSnapshot): BusinessRulesSnapshot;
   listBusinessAuditEntries(): BusinessAuditEntry[];
+  listOperationalZones(): OperationalZone[];
   listPromotions(): Promotion[];
+  saveOperationalZones(zones: OperationalZone[]): Promise<OperationalZone[]>;
   savePricingConfig(config: PricingConfig): Promise<PricingConfig>;
   savePromotion(promotion: Promotion): Promise<Promotion>;
 }

@@ -100,12 +100,14 @@ Actualmente el dominio implementado ya cubre:
 - ultima ubicacion conocida de conductora para priorizacion operativa
 - expiracion de solicitudes en `requested`
 - reserva temporal de solicitud para una conductora especifica antes de aceptacion definitiva
+- validacion real por zona operativa para solicitud y aceptacion
+- identificacion de zona operativa asociada al viaje
+- snapshot basico de ingresos de conductora basado en viajes completados y payout operativo
 
 Todavia no esta completamente implementado:
 
-- validacion real por zona operativa
-- rechazo/filtrado por politicas geograficas duras
 - asignacion automatica mas fuerte que la cola reservada actual
+- politicas geograficas mas avanzadas como multi-zona, bordes y reglas horarias
 
 ## Auditoria
 Todo cambio de estado y toda accion administrativa relevante debe generar `AuditEvent`.

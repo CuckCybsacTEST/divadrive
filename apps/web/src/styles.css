@@ -63,7 +63,15 @@ body {
   margin-bottom: 20px;
 }
 
+.alertsGrid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(240px, 1fr));
+  gap: 16px;
+  margin-bottom: 20px;
+}
+
 .stat,
+.alertCard,
 .panel,
 .banner {
   border: 1px solid rgba(31, 29, 26, 0.08);
@@ -75,6 +83,22 @@ body {
 
 .stat {
   padding: 18px 20px;
+}
+
+.alertCard {
+  padding: 18px 20px;
+}
+
+.alertCard.healthy {
+  border-left: 6px solid #188362;
+}
+
+.alertCard.watch {
+  border-left: 6px solid #c88a1a;
+}
+
+.alertCard.critical {
+  border-left: 6px solid #c44e27;
 }
 
 .stat span {

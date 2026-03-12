@@ -67,11 +67,12 @@ Ya implementado en codigo:
 - pasajero: autenticacion, mapa home, estimacion, solicitud, tracking basico, historial e incidencias
 - conductora: autenticacion, onboarding/aprobacion, cambio online/offline, cola de solicitudes, aceptacion y avance manual del viaje
 - empresa: login administrativo, dashboard operativo, directorio, incidencias, pricing, promociones y auditoria comercial
-- matching operativo inicial: disponibilidad de conductora, priorizacion por proximidad, expiracion de solicitudes y reserva temporal de cola
+- matching operativo inicial: disponibilidad de conductora, priorizacion por proximidad, expiracion de solicitudes, reserva temporal de cola y elegibilidad por zona operativa
+- lectura economica inicial de conductora: ingresos brutos, fee plataforma, neto estimado y viajes completados/cancelados
+- payout de conductora configurable desde pricing operativo
 
 Pendiente para considerar el MVP mas completo:
 
-- reglas reales por zona operativa
-- visualizacion de ingresos basicos para conductora
 - una asignacion/reserva todavia mas robusta para escenarios de concurrencia real
+- comision, bonos e ingresos mas detallados para conductora
 - endurecimiento de persistencia, observabilidad y politicas previas a produccion

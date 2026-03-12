@@ -1,4 +1,4 @@
-import { TRIP_EVENT_TYPES, TRIP_STATUSES, type DriverApprovalUpdate, type IncidentStatusUpdate, type PricingConfigUpdate, type PromotionUpsertPayload } from "@diva-drive/domain";
+import { TRIP_EVENT_TYPES, TRIP_STATUSES, type DriverApprovalUpdate, type IncidentStatusUpdate, type OperationalZoneUpsertPayload, type PricingConfigUpdate, type PromotionUpsertPayload } from "@diva-drive/domain";
 import { SERVICE_NAME } from "@diva-drive/domain";
 import type { DriverProfile, Promotion, TripIncident } from "@diva-drive/domain";
 import { appEnv } from "../env.js";
@@ -18,6 +18,7 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
     getPricingConfig,
     listPromotions,
     listBusinessAuditEntries,
+    listOperationalZones,
     getCommercialMetrics,
     getOpsEventStream,
     listDriverProfiles,
@@ -40,6 +41,8 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
     pricingConfigSchema,
     savePricingConfig,
     setPricingConfig,
+    zoneConfigSchema,
+    setOperationalZones,
     appendBusinessAudit,
     appendBusinessAuditEntry,
     publishBusinessRealtime,
@@ -106,6 +109,7 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
     return hydrateBusinessState({
       pricing: await getPricingConfig(),
       promotions: await listPromotions(),
+      operationalZones: await listOperationalZones(),
       auditLog: await listBusinessAuditEntries()
     });
   });
@@ -229,6 +233,26 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
     );
     await appendBusinessAuditEntry(auditEntry);
     publishBusinessRealtime("pricing_updated", { pricing, auditEntry });
+    return getBusinessSnapshot();
+  });
+
+  app.post<{ Body: OperationalZoneUpsertPayload }>("/ops/zones", async (request) => {
+    const session = requireSessionOrThrow(await requireOpsSession(request.headers.authorization));
+
+    const parsedPayload = zoneConfigSchema.safeParse(request.body);
+    if (!parsedPayload.success) {
+      apiError(400, "invalid_zone_payload");
+    }
+
+    const payload = parsedPayload.data as OperationalZoneUpsertPayload;
+    await setOperationalZones(payload.operationalZones);
+    const auditEntry = appendBusinessAudit(
+      session,
+      "zones_updated",
+      `Zonas operativas actualizadas: ${payload.operationalZones.filter((zone) => zone.isActive).length} activas`
+    );
+    await appendBusinessAuditEntry(auditEntry);
+    publishBusinessRealtime("zones_updated", { auditEntry });
     return getBusinessSnapshot();
   });
 

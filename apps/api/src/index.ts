@@ -2,6 +2,7 @@ import cors from "@fastify/cors";
 import Fastify from "fastify";
 import { z } from "zod";
 import {
+  DEFAULT_OPERATIONAL_ZONES,
   type AdminDirectorySnapshot,
   type BusinessAuditEntry,
   DEFAULT_PRICING_CONFIG,
@@ -9,6 +10,7 @@ import {
   DEFAULT_HOME_BOOTSTRAP,
   type DriverProfile,
   DRIVER_STATUS_FLOW,
+  type OperationalZone,
   type PassengerProfile,
   type PricingConfig,
   type Promotion,
@@ -26,6 +28,7 @@ import {
   getPromotionById,
   getPricingConfig,
   listBusinessAuditEntries,
+  saveOperationalZones,
   listPromotions,
   readBusinessRules,
   savePricingConfig,
@@ -105,6 +108,7 @@ const tripEventsById = new Map<string, TripTimelineEvent>();
 const driverProfilesById = new Map<string, DriverProfile>();
 const passengerProfilesById = new Map<string, PassengerProfile>();
 let pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG;
+let operationalZones: OperationalZone[] = DEFAULT_OPERATIONAL_ZONES;
 const promotionsById = new Map<string, Promotion>();
 const businessAuditLog: BusinessAuditEntry[] = [];
 let isBootstrapped = false;
@@ -113,12 +117,17 @@ let tripExpirySweepTimer: NodeJS.Timeout | null = null;
 
 const businessRepository = createBusinessRepository({
   businessAuditLog,
+  getOperationalZonesState: () => operationalZones,
   getPricingConfigState: () => pricingConfig,
   promotionsById,
+  setOperationalZonesState: (nextOperationalZones) => {
+    operationalZones = nextOperationalZones;
+  },
   setPricingConfigState: (nextPricingConfig) => {
     pricingConfig = nextPricingConfig;
   },
   appendBusinessAuditEntry,
+  saveOperationalZones,
   savePricingConfig,
   savePromotion
 });
@@ -177,7 +186,9 @@ const {
   appendBusinessAudit,
   estimateRide,
   getBusinessSnapshot,
-  hydrateBusinessState
+  hydrateBusinessState,
+  listOperationalZones,
+  resolveOperationalZone
 } = createBusinessService({
   businessRepository,
   tripRepository
@@ -241,7 +252,11 @@ const driverApprovalSchema = z.object({
   approvalStatus: z.enum(["pending", "approved", "rejected"])
 });
 const driverAvailabilitySchema = z.object({
-  availabilityStatus: z.enum(["offline", "online"])
+  availabilityStatus: z.enum(["offline", "online"]),
+  currentLocation: ridePointSchema.pick({
+    latitude: true,
+    longitude: true
+  }).optional()
 });
 const pricingConfigSchema = z.object({
   currency: z.string().min(3),
@@ -250,7 +265,8 @@ const pricingConfigSchema = z.object({
   perMinuteRate: z.number().nonnegative(),
   minimumFare: z.number().nonnegative(),
   serviceFee: z.number().nonnegative(),
-  surgeMultiplier: z.number().min(1)
+  surgeMultiplier: z.number().min(1),
+  driverPayoutRate: z.number().min(0.1).max(1)
 });
 const promotionSchema = z.object({
   name: z.string().min(2),
@@ -262,6 +278,20 @@ const promotionSchema = z.object({
   minFare: z.number().nonnegative(),
   description: z.string().min(4),
   isActive: z.boolean()
+});
+const zoneConfigSchema = z.object({
+  operationalZones: z.array(
+    z.object({
+      id: z.string().min(1),
+      name: z.string().min(2),
+      center: ridePointSchema.pick({
+        latitude: true,
+        longitude: true
+      }),
+      radiusKm: z.number().positive(),
+      isActive: z.boolean()
+    })
+  ).min(1)
 });
 
 const requireSession = async (authorizationHeader?: string) => {
@@ -340,6 +370,8 @@ const {
   getOpsEventStream,
   getOpsSnapshot
 } = createOpsService({
+  businessRepository,
+  directoryRepository,
   tripRepository
 });
 
@@ -347,6 +379,7 @@ const {
   createTripEvent,
   expireStaleRequestedTrips,
   getDriverActiveTrip,
+  getDriverEarnings,
   getDriverProfileById,
   getDriverQueue,
   getPassengerActiveTrip,
@@ -356,6 +389,8 @@ const {
   getTripTimeline,
   patchTrip
 } = createTripService({
+  getOperationalZones: () => listOperationalZones(),
+  getPricingConfig: () => pricingConfig,
   directoryRepository,
   tripRepository
 });
@@ -483,6 +518,7 @@ registerOpsRoutes({
   getPricingConfig,
   listPromotions,
   listBusinessAuditEntries,
+  listOperationalZones,
   getCommercialMetrics,
   getOpsEventStream,
   listDriverProfiles: directoryRepository.listDriverProfiles,
@@ -508,6 +544,9 @@ registerOpsRoutes({
   setPricingConfig: (nextPricingConfig) => {
     pricingConfig = nextPricingConfig;
   },
+  zoneConfigSchema,
+  setOperationalZones: (nextOperationalZones) =>
+    businessRepository.saveOperationalZones(nextOperationalZones),
   appendBusinessAudit,
   appendBusinessAuditEntry: businessRepository.appendBusinessAuditEntry,
   publishBusinessRealtime,
@@ -545,6 +584,7 @@ registerPassengerRoutes({
   defaultHomeBootstrap: DEFAULT_HOME_BOOTSTRAP,
   rideEstimateSchema,
   estimateRide,
+  resolveOperationalZone,
   createTripSchema,
   saveTrip: tripRepository.saveTrip,
   tripsById,
@@ -568,6 +608,9 @@ registerDriverRoutes({
   getDriverQueue,
   getDriverActiveTrip,
   getDriverProfileById,
+  getOperationalZoneById: (zoneId) =>
+    listOperationalZones().find((zone) => zone.id === zoneId) ?? null,
+  getDriverEarnings,
   driverAvailabilitySchema,
   getTripById,
   patchTrip,
@@ -619,9 +662,18 @@ export const bootstrapApp = async () => {
   const persistedBusinessRules = await readBusinessRules().catch(() => ({
     pricing: DEFAULT_PRICING_CONFIG,
     promotions: DEFAULT_PROMOTIONS,
+    operationalZones: DEFAULT_OPERATIONAL_ZONES,
     auditLog: []
   }));
-  hydrateBusinessState(persistedBusinessRules);
+  hydrateBusinessState({
+    pricing: {
+      ...DEFAULT_PRICING_CONFIG,
+      ...(persistedBusinessRules.pricing ?? {})
+    },
+    promotions: persistedBusinessRules.promotions ?? DEFAULT_PROMOTIONS,
+    operationalZones: persistedBusinessRules.operationalZones ?? DEFAULT_OPERATIONAL_ZONES,
+    auditLog: persistedBusinessRules.auditLog ?? []
+  });
   const persistedTrips = await readTrips();
   for (const trip of persistedTrips) {
     tripsById.set(trip.id, trip);

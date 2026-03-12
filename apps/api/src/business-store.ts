@@ -2,6 +2,7 @@ import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
+  DEFAULT_OPERATIONAL_ZONES,
   DEFAULT_PRICING_CONFIG,
   DEFAULT_PROMOTIONS,
   type BusinessRulesSnapshot
@@ -17,6 +18,7 @@ const BUSINESS_CONFIG_ID = "00000000-0000-0000-0000-000000000001";
 const defaultBusinessRules: BusinessRulesSnapshot = {
   pricing: DEFAULT_PRICING_CONFIG,
   promotions: DEFAULT_PROMOTIONS,
+  operationalZones: DEFAULT_OPERATIONAL_ZONES,
   auditLog: []
 };
 
@@ -33,7 +35,16 @@ const ensureDataFile = async () => {
 export const readLocalBusinessRules = async (): Promise<BusinessRulesSnapshot> => {
   await ensureDataFile();
   const content = await readFile(businessFile, "utf8");
-  return JSON.parse(content) as BusinessRulesSnapshot;
+  const parsed = JSON.parse(content) as Partial<BusinessRulesSnapshot>;
+  return {
+    pricing: {
+      ...DEFAULT_PRICING_CONFIG,
+      ...(parsed.pricing ?? {})
+    },
+    promotions: parsed.promotions ?? DEFAULT_PROMOTIONS,
+    operationalZones: parsed.operationalZones ?? DEFAULT_OPERATIONAL_ZONES,
+    auditLog: parsed.auditLog ?? []
+  };
 };
 
 export const writeLocalBusinessRules = async (payload: BusinessRulesSnapshot) => {
@@ -45,6 +56,7 @@ export const readBusinessRules = async (): Promise<BusinessRulesSnapshot> => {
   return {
     pricing: await getPricingConfig(),
     promotions: await listPromotions(),
+    operationalZones: await listOperationalZones(),
     auditLog: await listBusinessAuditEntries()
   };
 };
@@ -100,6 +112,18 @@ export const listBusinessAuditEntries = async (): Promise<BusinessRulesSnapshot[
   }
 
   return data?.map(mapAuditRow) ?? [];
+};
+
+export const listOperationalZones = async (): Promise<BusinessRulesSnapshot["operationalZones"]> =>
+  (await readLocalBusinessRules()).operationalZones;
+
+export const saveOperationalZones = async (
+  operationalZones: BusinessRulesSnapshot["operationalZones"]
+) => {
+  const business = await readLocalBusinessRules();
+  business.operationalZones = operationalZones;
+  await writeLocalBusinessRules(business);
+  return operationalZones;
 };
 
 export const getPromotionById = async (

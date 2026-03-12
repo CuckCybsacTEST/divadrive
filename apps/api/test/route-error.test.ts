@@ -89,7 +89,8 @@ test("ops routes map promotion code conflicts to promotion_code_conflict", async
     perMinuteRate: z.number().nonnegative(),
     minimumFare: z.number().nonnegative(),
     serviceFee: z.number().nonnegative(),
-    surgeMultiplier: z.number().min(1)
+    surgeMultiplier: z.number().min(1),
+    driverPayoutRate: z.number().min(0.1).max(1)
   });
   const promotionSchema = z.object({
     name: z.string().min(2),
@@ -142,9 +143,11 @@ test("ops routes map promotion code conflicts to promotion_code_conflict", async
       perMinuteRate: 0.3,
       minimumFare: 10,
       serviceFee: 1.5,
-      surgeMultiplier: 1
+      surgeMultiplier: 1,
+      driverPayoutRate: 0.82
     }),
     listPromotions: async () => [],
+    listOperationalZones: async () => [],
     listBusinessAuditEntries: async () => [],
     getCommercialMetrics: async () => ({}),
     getOpsEventStream: async () => [],
@@ -175,6 +178,21 @@ test("ops routes map promotion code conflicts to promotion_code_conflict", async
     pricingConfigSchema,
     savePricingConfig: async (config: PricingConfig) => config,
     setPricingConfig: () => undefined,
+    zoneConfigSchema: z.object({
+      operationalZones: z.array(
+        z.object({
+          id: z.string().min(1),
+          name: z.string().min(2),
+          center: z.object({
+            latitude: z.number(),
+            longitude: z.number()
+          }),
+          radiusKm: z.number().positive(),
+          isActive: z.boolean()
+        })
+      )
+    }),
+    setOperationalZones: async (zones) => zones,
     appendBusinessAudit: () => ({
       id: "audit-1",
       actorId: "operator-1",
@@ -193,8 +211,10 @@ test("ops routes map promotion code conflicts to promotion_code_conflict", async
         perMinuteRate: 0.3,
         minimumFare: 10,
         serviceFee: 1.5,
-        surgeMultiplier: 1
+        surgeMultiplier: 1,
+        driverPayoutRate: 0.82
       },
+      operationalZones: [],
       promotions: [],
       auditLog: []
     }),

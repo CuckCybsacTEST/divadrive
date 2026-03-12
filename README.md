@@ -62,8 +62,6 @@ Todavia no debe considerarse listo para produccion real. La prioridad actual es 
 - base realtime sobre WebSocket propio y bridge con Supabase Realtime
 
 ## Brechas actuales del MVP
-- reglas reales por zona operativa
-- ingresos basicos para conductora
 - reserva/asignacion mas robusta para evitar competencia simultanea sobre una misma solicitud
 - desacoplar totalmente el write-path restante del fallback local hacia persistencia live consistente
 - observabilidad y pipeline CI antes de cualquier salida productiva
@@ -76,9 +74,11 @@ Operativamente, la plataforma ya puede sostener un ciclo principal de servicio b
 - solicitudes no tomadas expiran automaticamente
 - la cola de conductora se prioriza por proximidad segun ultima ubicacion conocida
 - existe una ventana corta de reserva para evitar que dos conductoras compitan por la misma solicitud al mismo tiempo
+- las solicitudes y la elegibilidad de conductoras ya respetan zonas operativas configurables
+- la conductora ya ve ingresos basicos derivados de viajes completados y payout configurable
 - operaciones puede intervenir sobre conductoras, incidencias, pricing, promociones y monitoreo
 
-No esta lista todavia para una operacion comercial real en calle. Lo pendiente ya no es el flujo basico, sino endurecimiento operativo, reglas de zona, persistencia mas consistente y expansion de capacidades empresariales.
+No esta lista todavia para una operacion comercial real en calle. Lo pendiente ya no es el flujo basico, sino endurecimiento operativo, asignacion mas fuerte, persistencia mas consistente y expansion de capacidades empresariales.
 
 ## Documentos principales
 - `PROJECT_OVERVIEW.md`
@@ -105,6 +105,6 @@ No esta lista todavia para una operacion comercial real en calle. Lo pendiente y
 
 ## Siguiente paso recomendado
 1. terminar de mover el write-path restante del API a repositorios live sobre Supabase
-2. implementar reglas reales por zona operativa y elegibilidad geografica
-3. agregar ingresos basicos y vista operativa para conductora
-4. endurecer matching/reserva hacia una asignacion mas robusta
+2. endurecer matching/reserva hacia una asignacion mas robusta dentro de zona y concurrencia real
+3. ampliar ingresos de conductora hacia comision, bonos y reporting mas completo
+4. reforzar observabilidad, persistencia y runbooks preproductivos

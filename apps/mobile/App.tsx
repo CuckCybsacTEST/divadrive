@@ -16,6 +16,7 @@ import * as Location from "expo-location";
 import {
   type Coordinates,
   type DriverProfile,
+  type DriverEarningsSnapshot,
   DEFAULT_HOME_BOOTSTRAP,
   DRIVER_STATUS_FLOW,
   SERVICE_NAME,
@@ -146,6 +147,7 @@ export default function App() {
   const [driverQueue, setDriverQueue] = useState<RideTrip[]>([]);
   const [driverHome, setDriverHome] = useState<DriverQueueSummary | null>(null);
   const [driverProfile, setDriverProfile] = useState<DriverProfile | null>(null);
+  const [driverEarnings, setDriverEarnings] = useState<DriverEarningsSnapshot | null>(null);
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const resourceTimersRef = useRef<Record<string, ReturnType<typeof setTimeout> | null>>({});
@@ -299,6 +301,25 @@ export default function App() {
     setTripHistory(history.trips);
   };
 
+  const loadDriverEarnings = async (activeSession: AuthSession) => {
+    if (activeSession.user.role !== "driver") {
+      setDriverEarnings(null);
+      return;
+    }
+
+    const earnings = await api<DriverEarningsSnapshot>("/driver/earnings", activeSession).catch(
+      () => ({
+        currency: "PEN",
+        completedTrips: 0,
+        cancelledTrips: 0,
+        grossEarnings: 0,
+        platformFees: 0,
+        netEarnings: 0
+      })
+    );
+    setDriverEarnings(earnings);
+  };
+
   const loadTimeline = async (activeSession: AuthSession, tripId?: string) => {
     const targetTripId = tripId ?? activeTrip?.id;
     if (!targetTripId) {
@@ -352,7 +373,8 @@ export default function App() {
       loadDriverHome(activeSession),
       loadDriverQueue(activeSession),
       loadActiveTrip(activeSession),
-      loadTripHistory(activeSession)
+      loadTripHistory(activeSession),
+      loadDriverEarnings(activeSession)
     ]);
     await loadTimeline(activeSession, trip?.id);
   };
@@ -491,6 +513,7 @@ export default function App() {
               setEstimate(payload.trip.estimate);
               setTripHistory((current) => upsertTrip(current, payload.trip!));
               setDriverQueue((current) => current.filter((item) => item.id !== payload.trip!.id));
+              scheduleResourceRefresh("driver.earnings", () => loadDriverEarnings(session));
               return;
             }
             scheduleResourceRefresh("driver.activeTrip", async () => {
@@ -501,9 +524,11 @@ export default function App() {
           case "trip.history.refresh":
             if (payload.trip) {
               setTripHistory((current) => upsertTrip(current, payload.trip!));
+              scheduleResourceRefresh("driver.earnings", () => loadDriverEarnings(session));
               return;
             }
             scheduleResourceRefresh("driver.history", () => loadTripHistory(session));
+            scheduleResourceRefresh("driver.earnings", () => loadDriverEarnings(session));
             return;
           case "trip.timeline.refresh":
             if (payload.timelineEvent) {
@@ -1236,6 +1261,24 @@ export default function App() {
                   )}
                 </View>
               )}
+              <View style={styles.card}>
+                <Text style={styles.heading}>Ingresos basicos</Text>
+                <Text style={styles.strong}>
+                  {driverEarnings?.currency ?? "PEN"} {driverEarnings?.netEarnings.toFixed(2) ?? "0.00"}
+                </Text>
+                <Text style={styles.muted}>
+                  Viajes completados: {driverEarnings?.completedTrips ?? 0}
+                </Text>
+                <Text style={styles.muted}>
+                  Cancelados: {driverEarnings?.cancelledTrips ?? 0}
+                </Text>
+                <Text style={styles.muted}>
+                  Bruto: {driverEarnings?.currency ?? "PEN"} {driverEarnings?.grossEarnings.toFixed(2) ?? "0.00"}
+                </Text>
+                <Text style={styles.muted}>
+                  Fee plataforma: {driverEarnings?.currency ?? "PEN"} {driverEarnings?.platformFees.toFixed(2) ?? "0.00"}
+                </Text>
+              </View>
               <View style={styles.card}>
                 <Text style={styles.heading}>Historial reciente</Text>
                 {tripHistory.length === 0 ? (

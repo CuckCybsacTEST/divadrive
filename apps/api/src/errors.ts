@@ -27,6 +27,7 @@ export const API_ERROR_CODES = [
   "invalid_sign_in_payload",
   "invalid_sign_up_payload",
   "invalid_trip_payload",
+  "invalid_zone_payload",
   "invalid_status_payload",
   "invalid_status_transition",
   "passenger_mismatch",
@@ -43,7 +44,10 @@ export const API_ERROR_CODES = [
   "trip_not_available",
   "trip_not_found",
   "trip_not_found_for_driver",
+  "trip_outside_operational_zone",
+  "trip_reservation_required",
   "trip_reserved_for_another_driver",
+  "driver_outside_operational_zone",
   "trip_persistence_failed"
 ] as const;
 

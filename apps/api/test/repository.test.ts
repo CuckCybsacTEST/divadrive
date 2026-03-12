@@ -2,6 +2,7 @@ import assert from "node:assert/strict";
 import test from "node:test";
 import type {
   DriverProfile,
+  OperationalZone,
   PassengerProfile,
   PricingConfig,
   Promotion,
@@ -21,7 +22,8 @@ const pricing: PricingConfig = {
   perMinuteRate: 0.3,
   minimumFare: 10,
   serviceFee: 1.5,
-  surgeMultiplier: 1
+  surgeMultiplier: 1,
+  driverPayoutRate: 0.82
 };
 
 const promotion: Promotion = {
@@ -36,6 +38,17 @@ const promotion: Promotion = {
   description: "Promo test",
   isActive: true,
   createdAt: "2026-03-11T10:00:00.000Z"
+};
+
+const operationalZone: OperationalZone = {
+  id: "lima-central",
+  name: "Lima Metropolitana",
+  center: {
+    latitude: -12.0464,
+    longitude: -77.0428
+  },
+  radiusKm: 18,
+  isActive: true
 };
 
 const trip: RideTrip = {
@@ -117,10 +130,13 @@ const timelineEvent: TripTimelineEvent = {
 test("business repository maps unique conflicts and generic persistence failures", async () => {
   const repository = createBusinessRepository({
     businessAuditLog: [],
+    getOperationalZonesState: () => [operationalZone],
     getPricingConfigState: () => pricing,
     promotionsById: new Map(),
+    setOperationalZonesState: () => undefined,
     setPricingConfigState: () => undefined,
     appendBusinessAuditEntry: async (entry) => entry,
+    saveOperationalZones: async (zones) => zones,
     savePricingConfig: async () => {
       throw new Error("pricing offline");
     },
@@ -230,12 +246,15 @@ test("domain repositories hydrate and cache read models behind a typed interface
   });
   const businessRepository = createBusinessRepository({
     businessAuditLog: [],
+    getOperationalZonesState: () => [operationalZone],
     getPricingConfigState: () => currentPricing,
     promotionsById: new Map(),
+    setOperationalZonesState: () => undefined,
     setPricingConfigState: (nextPricing) => {
       currentPricing = nextPricing;
     },
     appendBusinessAuditEntry: async (entry) => entry,
+    saveOperationalZones: async (zones) => zones,
     savePricingConfig: async (config) => config,
     savePromotion: async (nextPromotion) => nextPromotion
   });
@@ -246,8 +265,10 @@ test("domain repositories hydrate and cache read models behind a typed interface
   businessRepository.hydrateSnapshot({
     pricing,
     promotions: [promotion],
+    operationalZones: [operationalZone],
     auditLog: []
   });
   assert.equal(businessRepository.getSnapshot().promotions[0]?.code, "DIVA10");
+  assert.equal(businessRepository.getSnapshot().operationalZones[0]?.id, operationalZone.id);
   assert.equal((await tripRepository.listEventsByTrip(trip.id))[0]?.id, timelineEvent.id);
 });

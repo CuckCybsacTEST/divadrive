@@ -23,6 +23,7 @@ export const TRIP_EVENT_TYPES = [
   "trip_requested",
   "trip_matched",
   "driver_assigned",
+  "trip_offer_reassigned",
   "driver_arrived",
   "trip_started",
   "trip_completed",
@@ -226,6 +227,15 @@ export interface PricingConfig {
   minimumFare: number;
   serviceFee: number;
   surgeMultiplier: number;
+  driverPayoutRate: number;
+}
+
+export interface OperationalZone {
+  id: string;
+  name: string;
+  center: Coordinates;
+  radiusKm: number;
+  isActive: boolean;
 }
 
 export interface Promotion {
@@ -303,9 +313,11 @@ export interface RideTrip {
   cancelledAt?: string;
   requestedPromoCode?: string;
   expiresAt?: string;
+  operationalZoneId?: string;
   reservedDriverId?: string;
   reservedAt?: string;
   reservedUntil?: string;
+  offeredDriverIds?: string[];
 }
 
 export interface CreateTripRequest extends RideEstimateRequest {
@@ -338,6 +350,7 @@ export interface OpsDashboardSnapshot {
 export interface BusinessRulesSnapshot {
   pricing: PricingConfig;
   promotions: Promotion[];
+  operationalZones: OperationalZone[];
   auditLog: BusinessAuditEntry[];
 }
 
@@ -347,6 +360,23 @@ export interface PromoPerformance {
   totalDiscountAmount: number;
 }
 
+export interface ZoneOperationalHealth {
+  zoneId: string;
+  zoneName: string;
+  requestedTrips: number;
+  expiredRequests: number;
+  reassignedOffers: number;
+  pendingReservations: number;
+}
+
+export interface DriverAttentionSnapshot {
+  driverId: string;
+  fullName: string;
+  activeReservations: number;
+  reassignedAwayOffers: number;
+  currentOfferZoneId?: string;
+}
+
 export interface CommercialMetricsSnapshot {
   totalRevenue: number;
   totalDiscountAmount: number;
@@ -354,10 +384,26 @@ export interface CommercialMetricsSnapshot {
   cancelledTrips: number;
   averageCompletedFare: number;
   promoPerformance: PromoPerformance[];
+  matchedTrips: number;
+  expiredRequests: number;
+  pendingReservedTrips: number;
+  reassignedOffers: number;
+  averageSecondsToMatch: number;
+  zoneHealth: ZoneOperationalHealth[];
+  driverAttention: DriverAttentionSnapshot[];
 }
 
 export interface TripHistorySnapshot {
   trips: RideTrip[];
+}
+
+export interface DriverEarningsSnapshot {
+  currency: string;
+  completedTrips: number;
+  cancelledTrips: number;
+  grossEarnings: number;
+  platformFees: number;
+  netEarnings: number;
 }
 
 export interface TripTimelineSnapshot {
@@ -375,7 +421,7 @@ export interface BusinessAuditEntry {
   id: string;
   actorId: string;
   actorRole: Extract<UserRole, "operator" | "admin">;
-  action: "pricing_updated" | "promotion_created" | "promotion_updated";
+  action: "pricing_updated" | "promotion_created" | "promotion_updated" | "zones_updated";
   summary: string;
   occurredAt: string;
 }
@@ -402,6 +448,11 @@ export interface PricingConfigUpdate {
   minimumFare: number;
   serviceFee: number;
   surgeMultiplier: number;
+  driverPayoutRate: number;
+}
+
+export interface OperationalZoneUpsertPayload {
+  operationalZones: OperationalZone[];
 }
 
 export interface PromotionUpsertPayload {
@@ -452,7 +503,8 @@ export const DEFAULT_PRICING_CONFIG: PricingConfig = {
   perMinuteRate: 0.22,
   minimumFare: 8.5,
   serviceFee: 1.2,
-  surgeMultiplier: 1
+  surgeMultiplier: 1,
+  driverPayoutRate: 0.82
 };
 
 export const DEFAULT_PROMOTIONS: Promotion[] = [
@@ -483,6 +535,58 @@ export const DEFAULT_PROMOTIONS: Promotion[] = [
     createdAt: "2026-03-10T00:00:00.000Z"
   }
 ];
+
+export const DEFAULT_OPERATIONAL_ZONES: OperationalZone[] = [
+  {
+    id: "lima-central",
+    name: "Lima Metropolitana",
+    center: {
+      latitude: -12.0464,
+      longitude: -77.0428
+    },
+    radiusKm: 18,
+    isActive: true
+  }
+];
+
+const toRadians = (value: number) => (value * Math.PI) / 180;
+
+export const distanceKmBetweenCoordinates = (
+  origin: Coordinates,
+  destination: Coordinates
+) => {
+  const earthRadiusKm = 6371;
+  const deltaLatitude = toRadians(destination.latitude - origin.latitude);
+  const deltaLongitude = toRadians(destination.longitude - origin.longitude);
+  const latitudeA = toRadians(origin.latitude);
+  const latitudeB = toRadians(destination.latitude);
+
+  const haversine =
+    Math.sin(deltaLatitude / 2) * Math.sin(deltaLatitude / 2) +
+    Math.cos(latitudeA) *
+      Math.cos(latitudeB) *
+      Math.sin(deltaLongitude / 2) *
+      Math.sin(deltaLongitude / 2);
+
+  return earthRadiusKm * 2 * Math.atan2(Math.sqrt(haversine), Math.sqrt(1 - haversine));
+};
+
+export const isPointWithinOperationalZone = (
+  point: Coordinates,
+  zone: OperationalZone
+) => zone.isActive && distanceKmBetweenCoordinates(point, zone.center) <= zone.radiusKm;
+
+export const resolveOperationalZoneForRoute = (
+  origin: Coordinates,
+  destination: Coordinates,
+  zones: OperationalZone[]
+) =>
+  zones.find(
+    (zone) =>
+      zone.isActive &&
+      isPointWithinOperationalZone(origin, zone) &&
+      isPointWithinOperationalZone(destination, zone)
+  ) ?? null;
 
 export const SUGGESTED_DESTINATIONS: RidePoint[] = [
   {

@@ -4,7 +4,7 @@ import type {
   DriverTripStatusUpdate,
   RideTrip
 } from "@diva-drive/domain";
-import { isTripReservationActive } from "@diva-drive/domain";
+import { isPointWithinOperationalZone, isTripReservationActive } from "@diva-drive/domain";
 import { apiError } from "../errors.js";
 import { requireSessionOrThrow } from "./helpers.js";
 import type { DriverRoutesContext } from "./context.js";
@@ -16,7 +16,9 @@ export const registerDriverRoutes = (context: DriverRoutesContext) => {
     requireRole,
     getDriverQueue,
     getDriverActiveTrip,
+    getDriverEarnings,
     getDriverProfileById,
+    getOperationalZoneById,
     driverAvailabilitySchema,
     getTripById,
     patchTrip,
@@ -90,9 +92,28 @@ export const registerDriverRoutes = (context: DriverRoutesContext) => {
       };
     }
 
+    const queue = await getDriverQueue(session.user.id);
+
+    for (const reassignedOffer of queue.reassignedOffers) {
+      publishTripRealtime(reassignedOffer.trip, "trip_offer_reassigned");
+      publishTripTimelineRealtime(
+        reassignedOffer.trip,
+        "trip_offer_reassigned",
+        reassignedOffer.timelineEvent
+      );
+    }
+
     return {
-      trips: await getDriverQueue(session.user.id)
+      trips: queue.trips
     };
+  });
+
+  app.get("/driver/earnings", async (request) => {
+    const session = requireSessionOrThrow(
+      requireRole(await requireSession(request.headers.authorization), "driver")
+    );
+
+    return getDriverEarnings(session.user.id);
   });
 
   app.post<{ Params: { tripId: string } }>(
@@ -123,12 +144,33 @@ export const registerDriverRoutes = (context: DriverRoutesContext) => {
         apiError(404, "trip_not_available");
       }
       const currentTrip = trip as RideTrip;
+      const tripOperationalZone = currentTrip.operationalZoneId
+        ? getOperationalZoneById(currentTrip.operationalZoneId)
+        : null;
 
       if (
         isTripReservationActive(currentTrip) &&
         currentTrip.reservedDriverId !== session.user.id
       ) {
         apiError(409, "trip_reserved_for_another_driver");
+      }
+
+      if (
+        !isTripReservationActive(currentTrip) ||
+        currentTrip.reservedDriverId !== session.user.id
+      ) {
+        apiError(409, "trip_reservation_required");
+      }
+
+      if (
+        tripOperationalZone &&
+        (!currentDriverProfile.lastKnownLocation ||
+          !isPointWithinOperationalZone(
+            currentDriverProfile.lastKnownLocation,
+            tripOperationalZone
+          ))
+      ) {
+        apiError(403, "driver_outside_operational_zone");
       }
 
       const acceptedTrip = patchTrip(currentTrip.id, {
@@ -139,7 +181,8 @@ export const registerDriverRoutes = (context: DriverRoutesContext) => {
         currentDriverLocation: buildDriverLocation(currentTrip, "matched"),
         reservedDriverId: undefined,
         reservedAt: undefined,
-        reservedUntil: undefined
+        reservedUntil: undefined,
+        offeredDriverIds: undefined
       });
 
       if (!acceptedTrip) {

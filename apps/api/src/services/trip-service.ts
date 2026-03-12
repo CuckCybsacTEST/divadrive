@@ -1,12 +1,16 @@
 import type {
   AuthSession,
+  DriverEarningsSnapshot,
   OperationalNotification,
+  OperationalZone,
+  PricingConfig,
   RideTrip,
   TripHistorySnapshot,
   TripTimelineEvent,
   TripTimelineSnapshot
 } from "@diva-drive/domain";
 import {
+  isPointWithinOperationalZone,
   getTripReservationExpiresAt,
   isTripRequestExpired,
   isTripReservationActive
@@ -14,7 +18,12 @@ import {
 import type { DirectoryRepository, TripRepository } from "../repositories/contracts.js";
 
 interface TripServiceDependencies {
-  directoryRepository: Pick<DirectoryRepository, "getDriverProfileById">;
+  getOperationalZones: () => OperationalZone[];
+  getPricingConfig: () => PricingConfig;
+  directoryRepository: Pick<
+    DirectoryRepository,
+    "getDriverProfileById" | "listDriverProfiles"
+  >;
   tripRepository: Pick<
     TripRepository,
     | "appendEvent"
@@ -26,6 +35,14 @@ interface TripServiceDependencies {
     | "patchCachedTrip"
     | "saveTrip"
   >;
+}
+
+interface DriverQueueSnapshot {
+  trips: RideTrip[];
+  reassignedOffers: Array<{
+    trip: RideTrip;
+    timelineEvent: TripTimelineEvent;
+  }>;
 }
 
 const toRadians = (value: number) => (value * Math.PI) / 180;
@@ -51,12 +68,75 @@ const distanceKmBetween = (
 };
 
 export const createTripService = ({
+  getOperationalZones,
+  getPricingConfig,
   directoryRepository,
   tripRepository
 }: TripServiceDependencies) => {
-  const reserveTripForDriver = async (trip: RideTrip, driverId: string, now = Date.now()) => {
-    if (trip.status !== "requested") {
+  const DRIVER_QUEUE_OFFER_LIMIT = 1;
+
+  const isDriverEligibleForTrip = (
+    driverProfile: Awaited<ReturnType<DirectoryRepository["getDriverProfileById"]>>,
+    trip: RideTrip,
+    operationalZones = getOperationalZones()
+  ) => {
+    if (
+      !driverProfile ||
+      driverProfile.approvalStatus !== "approved" ||
+      driverProfile.availabilityStatus !== "online"
+    ) {
+      return false;
+    }
+
+    if (!trip.operationalZoneId) {
+      return true;
+    }
+
+    if (!driverProfile.lastKnownLocation) {
+      return false;
+    }
+
+    const zone = operationalZones.find((currentZone) => currentZone.id === trip.operationalZoneId);
+    return zone ? isPointWithinOperationalZone(driverProfile.lastKnownLocation, zone) : false;
+  };
+
+  const recycleTripOfferWindowIfNeeded = async (trip: RideTrip, now = Date.now()) => {
+    if (isTripReservationActive(trip, now) || !trip.offeredDriverIds?.length) {
       return trip;
+    }
+
+    const operationalZones = getOperationalZones();
+    const eligibleDriverIds = (await directoryRepository.listDriverProfiles())
+      .filter((driverProfile) => isDriverEligibleForTrip(driverProfile, trip, operationalZones))
+      .map((driverProfile) => driverProfile.id);
+
+    if (
+      eligibleDriverIds.length === 0 ||
+      !eligibleDriverIds.every((driverId) => trip.offeredDriverIds?.includes(driverId))
+    ) {
+      return trip;
+    }
+
+    const recycledTrip = tripRepository.patchCachedTrip(trip.id, {
+      reservedDriverId: undefined,
+      reservedAt: undefined,
+      reservedUntil: undefined,
+      offeredDriverIds: []
+    });
+
+    return recycledTrip ? tripRepository.saveTrip(recycledTrip) : trip;
+  };
+
+  const reserveTripForDriver = async (
+    trip: RideTrip,
+    driverId: string,
+    now = Date.now()
+  ): Promise<{
+    trip: RideTrip;
+    timelineEvent?: TripTimelineEvent;
+  }> => {
+    if (trip.status !== "requested") {
+      return { trip };
     }
 
     if (isTripReservationActive(trip, now) && trip.reservedDriverId === driverId) {
@@ -67,21 +147,40 @@ export const createTripService = ({
       });
 
       return refreshedReservationTrip
-        ? tripRepository.saveTrip(refreshedReservationTrip)
-        : trip;
+        ? { trip: await tripRepository.saveTrip(refreshedReservationTrip) }
+        : { trip };
     }
 
     if (isTripReservationActive(trip, now) && trip.reservedDriverId !== driverId) {
-      return trip;
+      return { trip };
     }
 
     const reservedTrip = tripRepository.patchCachedTrip(trip.id, {
       reservedAt: new Date(now).toISOString(),
       reservedDriverId: driverId,
-      reservedUntil: getTripReservationExpiresAt(now)
+      reservedUntil: getTripReservationExpiresAt(now),
+      offeredDriverIds: Array.from(new Set([...(trip.offeredDriverIds ?? []), driverId]))
+    });
+    if (!reservedTrip) {
+      return { trip };
+    }
+
+    const persistedTrip = await tripRepository.saveTrip(reservedTrip);
+    if ((trip.offeredDriverIds?.length ?? 0) === 0 || trip.offeredDriverIds?.includes(driverId)) {
+      return { trip: persistedTrip };
+    }
+
+    const timelineEvent = await createTripEvent({
+      tripId: persistedTrip.id,
+      type: "trip_offer_reassigned",
+      occurredAt: new Date(now).toISOString(),
+      message: "La solicitud fue reasignada a otra conductora elegible"
     });
 
-    return reservedTrip ? tripRepository.saveTrip(reservedTrip) : trip;
+    return {
+      trip: persistedTrip,
+      timelineEvent
+    };
   };
 
   const expireTripIfNeeded = async (trip: RideTrip | null) => {
@@ -154,19 +253,54 @@ export const createTripService = ({
     );
   };
 
-  const getDriverQueue = async (driverId: string) => {
+  const getDriverQueue = async (driverId: string): Promise<DriverQueueSnapshot> => {
     await expireStaleRequestedTrips();
-    const requestedTrips = await tripRepository.listTripsByStatus("requested");
+    const requestedTrips = await Promise.all(
+      (await tripRepository.listTripsByStatus("requested")).map((trip) =>
+        recycleTripOfferWindowIfNeeded(trip)
+      )
+    );
     const driverProfile = await directoryRepository.getDriverProfileById(driverId);
     const driverLocation = driverProfile?.lastKnownLocation;
+    const operationalZones = getOperationalZones();
     const now = Date.now();
-    const eligibleTrips = requestedTrips.filter(
-      (trip) => !isTripReservationActive(trip, now) || trip.reservedDriverId === driverId
-    );
+    const eligibleTrips = requestedTrips.filter((trip) => {
+      if (isTripReservationActive(trip, now) && trip.reservedDriverId !== driverId) {
+        return false;
+      }
+
+      if (
+        !isTripReservationActive(trip, now) &&
+        trip.offeredDriverIds?.includes(driverId)
+      ) {
+        return false;
+      }
+
+      if (!trip.operationalZoneId) {
+        return true;
+      }
+
+      if (!driverLocation) {
+        return false;
+      }
+
+      const zone = operationalZones.find((currentZone) => currentZone.id === trip.operationalZoneId);
+      return zone ? isPointWithinOperationalZone(driverLocation, zone) : false;
+    });
 
     if (!driverLocation) {
       const queue = eligibleTrips.sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
-      return Promise.all(queue.slice(0, 3).map((trip) => reserveTripForDriver(trip, driverId, now)));
+      const reservedTrips = await Promise.all(
+        queue
+          .slice(0, DRIVER_QUEUE_OFFER_LIMIT)
+          .map((trip) => reserveTripForDriver(trip, driverId, now))
+      );
+      return {
+        trips: reservedTrips.map((entry) => entry.trip),
+        reassignedOffers: reservedTrips.flatMap((entry) =>
+          entry.timelineEvent ? [{ trip: entry.trip, timelineEvent: entry.timelineEvent }] : []
+        )
+      };
     }
 
     const prioritizedQueue = [...eligibleTrips].sort((a, b) => {
@@ -175,9 +309,17 @@ export const createTripService = ({
       return distanceToTripA - distanceToTripB || b.requestedAt.localeCompare(a.requestedAt);
     });
 
-    return Promise.all(
-      prioritizedQueue.slice(0, 3).map((trip) => reserveTripForDriver(trip, driverId, now))
+    const reservedTrips = await Promise.all(
+      prioritizedQueue
+        .slice(0, DRIVER_QUEUE_OFFER_LIMIT)
+        .map((trip) => reserveTripForDriver(trip, driverId, now))
     );
+    return {
+      trips: reservedTrips.map((entry) => entry.trip),
+      reassignedOffers: reservedTrips.flatMap((entry) =>
+        entry.timelineEvent ? [{ trip: entry.trip, timelineEvent: entry.timelineEvent }] : []
+      )
+    };
   };
 
   const getDriverProfileById = async (driverId: string) =>
@@ -240,10 +382,35 @@ export const createTripService = ({
     };
   };
 
+  const getDriverEarnings = async (driverId: string): Promise<DriverEarningsSnapshot> => {
+    const trips = await tripRepository.listTripsByDriver(driverId);
+    const pricingConfig = getPricingConfig();
+    const completedTrips = trips.filter((trip) => trip.status === "trip_completed");
+    const cancelledTrips = trips.filter((trip) => trip.status === "cancelled");
+    const grossEarnings = Number(
+      completedTrips
+        .reduce((total, trip) => total + trip.estimate.estimatedFare, 0)
+        .toFixed(2)
+    );
+    const platformFees = Number(
+      (grossEarnings * (1 - pricingConfig.driverPayoutRate)).toFixed(2)
+    );
+
+    return {
+      currency: completedTrips[0]?.estimate.currency ?? pricingConfig.currency,
+      completedTrips: completedTrips.length,
+      cancelledTrips: cancelledTrips.length,
+      grossEarnings,
+      platformFees,
+      netEarnings: Number(Math.max(grossEarnings - platformFees, 0).toFixed(2))
+    };
+  };
+
   return {
     createTripEvent,
     expireStaleRequestedTrips,
     getDriverActiveTrip,
+    getDriverEarnings,
     getDriverProfileById,
     getDriverQueue,
     getPassengerActiveTrip,

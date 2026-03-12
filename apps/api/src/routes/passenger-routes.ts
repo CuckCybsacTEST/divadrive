@@ -21,6 +21,7 @@ export const registerPassengerRoutes = (context: PassengerRoutesContext) => {
     defaultHomeBootstrap,
     rideEstimateSchema,
     estimateRide,
+    resolveOperationalZone,
     createTripSchema,
     saveTrip,
     tripsById,
@@ -62,7 +63,7 @@ export const registerPassengerRoutes = (context: PassengerRoutesContext) => {
 
     return {
       city: defaultHomeBootstrap.city,
-      queueSize: isDriverOnline ? (await getDriverQueue(session.user.id)).length : 0,
+      queueSize: isDriverOnline ? (await getDriverQueue(session.user.id)).trips.length : 0,
       activeTrip,
       driverProfile,
       notifications: await getRecentOperationalNotifications(session, activeTrip)
@@ -107,6 +108,13 @@ export const registerPassengerRoutes = (context: PassengerRoutesContext) => {
     }
 
     const estimate = await estimateRide(payload as RideEstimateRequest, session.user.id);
+    const operationalZone = resolveOperationalZone(payload.origin, payload.destination);
+
+    if (!operationalZone) {
+      apiError(403, "trip_outside_operational_zone");
+    }
+    const currentOperationalZone = operationalZone!;
+
     const persistedTrip = await saveTrip({
       id: `trip-${Date.now()}`,
       passengerId: payload.passengerId,
@@ -115,6 +123,7 @@ export const registerPassengerRoutes = (context: PassengerRoutesContext) => {
       destination: payload.destination,
       estimate,
       requestedPromoCode: payload.promoCode?.trim().toUpperCase(),
+      operationalZoneId: currentOperationalZone.id,
       status: "requested",
       requestedAt: new Date().toISOString()
     });

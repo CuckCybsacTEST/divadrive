@@ -5,9 +5,11 @@ import type {
   AuthSession,
   BusinessAuditEntry,
   BusinessRulesSnapshot,
+  DriverEarningsSnapshot,
   DriverProfile,
   DriverTripStatusUpdate,
   HomeBootstrap,
+  OperationalZone,
   OpsDashboardSnapshot,
   PassengerProfile,
   PricingConfig,
@@ -65,6 +67,7 @@ export interface OpsRoutesContext {
   getPricingConfig: () => Promise<PricingConfig>;
   listPromotions: () => Promise<Promotion[]>;
   listBusinessAuditEntries: () => Promise<BusinessAuditEntry[]>;
+  listOperationalZones: () => Promise<OperationalZone[]> | OperationalZone[];
   getCommercialMetrics: () => Promise<unknown>;
   getOpsEventStream: () => Promise<TripTimelineEvent[]>;
   listDriverProfiles: () => Promise<DriverProfile[]>;
@@ -92,6 +95,8 @@ export interface OpsRoutesContext {
   pricingConfigSchema: ZodTypeAny;
   savePricingConfig: (config: PricingConfig) => Promise<PricingConfig>;
   setPricingConfig: (config: PricingConfig) => void;
+  zoneConfigSchema: ZodTypeAny;
+  setOperationalZones: (zones: OperationalZone[]) => Promise<OperationalZone[]>;
   appendBusinessAudit: (
     session: AuthSession,
     action: BusinessAuditEntry["action"],
@@ -118,7 +123,13 @@ export interface PassengerRoutesContext {
   requireRole: (session: AuthSession | null, role: Role) => AuthSession | null;
   getPassengerActiveTrip: (passengerId: string) => Promise<RideTrip | null>;
   getDriverActiveTrip: (driverId: string) => Promise<RideTrip | null>;
-  getDriverQueue: (driverId: string) => Promise<RideTrip[]>;
+  getDriverQueue: (driverId: string) => Promise<{
+    trips: RideTrip[];
+    reassignedOffers: Array<{
+      trip: RideTrip;
+      timelineEvent: TripTimelineEvent;
+    }>;
+  }>;
   getDriverProfileById: (driverId: string) => Promise<DriverProfile | null>;
   getRecentOperationalNotifications: (
     session: AuthSession,
@@ -127,6 +138,10 @@ export interface PassengerRoutesContext {
   defaultHomeBootstrap: HomeBootstrap;
   rideEstimateSchema: ZodTypeAny;
   estimateRide: (request: RideEstimateRequest, passengerId: string) => Promise<RideEstimate>;
+  resolveOperationalZone: (
+    origin: RidePoint,
+    destination: RidePoint
+  ) => OperationalZone | null;
   createTripSchema: ZodTypeAny;
   saveTrip: (trip: RideTrip) => Promise<RideTrip>;
   tripsById: Map<string, RideTrip>;
@@ -158,9 +173,17 @@ export interface DriverRoutesContext {
   app: FastifyInstance;
   requireSession: (authorizationHeader?: string) => Promise<AuthSession | null>;
   requireRole: (session: AuthSession | null, role: Role) => AuthSession | null;
-  getDriverQueue: (driverId: string) => Promise<RideTrip[]>;
+  getDriverQueue: (driverId: string) => Promise<{
+    trips: RideTrip[];
+    reassignedOffers: Array<{
+      trip: RideTrip;
+      timelineEvent: TripTimelineEvent;
+    }>;
+  }>;
   getDriverActiveTrip: (driverId: string) => Promise<RideTrip | null>;
   getDriverProfileById: (driverId: string) => Promise<DriverProfile | null>;
+  getOperationalZoneById: (zoneId: string) => OperationalZone | null;
+  getDriverEarnings: (driverId: string) => Promise<DriverEarningsSnapshot>;
   driverAvailabilitySchema: ZodTypeAny;
   getTripById: (tripId: string) => Promise<RideTrip | null>;
   patchTrip: (tripId: string, patch: Partial<RideTrip>) => RideTrip | null;

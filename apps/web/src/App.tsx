@@ -8,6 +8,7 @@ import {
   type AuthSession,
   type DriverApprovalStatus,
   type IncidentStatus,
+  type OperationalZone,
   type OpsDashboardSnapshot,
   type PricingConfig,
   type PromotionUpsertPayload,
@@ -54,8 +55,10 @@ const emptyBusiness: BusinessRulesSnapshot = {
     perMinuteRate: 0,
     minimumFare: 0,
     serviceFee: 0,
-    surgeMultiplier: 1
+    surgeMultiplier: 1,
+    driverPayoutRate: 0.82
   },
+  operationalZones: [],
   promotions: [],
   auditLog: []
 };
@@ -66,13 +69,168 @@ const emptyCommercialMetrics: CommercialMetricsSnapshot = {
   completedTrips: 0,
   cancelledTrips: 0,
   averageCompletedFare: 0,
-  promoPerformance: []
+  promoPerformance: [],
+  matchedTrips: 0,
+  expiredRequests: 0,
+  pendingReservedTrips: 0,
+  reassignedOffers: 0,
+  averageSecondsToMatch: 0,
+  zoneHealth: [],
+  driverAttention: []
 };
 
 const emptyEventStream: TripTimelineEvent[] = [];
 
 const formatMoney = (trip: RideTrip) =>
   `${trip.estimate.currency} ${trip.estimate.estimatedFare.toFixed(2)}`;
+
+const formatEventLabel = (event: TripTimelineEvent) =>
+  event.type === "trip_offer_reassigned" ? "Oferta reasignada" : event.type;
+
+const buildOperationalAlerts = (metrics: CommercialMetricsSnapshot) => {
+  const alerts: Array<{
+    id: string;
+    level: "healthy" | "watch" | "critical";
+    title: string;
+    detail: string;
+  }> = [];
+
+  if (metrics.averageSecondsToMatch >= 120) {
+    alerts.push({
+      id: "match-delay",
+      level: "critical",
+      title: "Tiempo a match alto",
+      detail: `El promedio actual es ${metrics.averageSecondsToMatch}s y ya esta fuera del rango sano.`
+    });
+  } else if (metrics.averageSecondsToMatch >= 75) {
+    alerts.push({
+      id: "match-delay-watch",
+      level: "watch",
+      title: "Tiempo a match en vigilancia",
+      detail: `El promedio actual es ${metrics.averageSecondsToMatch}s y conviene revisar disponibilidad.`
+    });
+  } else {
+    alerts.push({
+      id: "match-delay-ok",
+      level: "healthy",
+      title: "Tiempo a match estable",
+      detail: `El promedio actual es ${metrics.averageSecondsToMatch}s.`
+    });
+  }
+
+  if (metrics.expiredRequests >= 3) {
+    alerts.push({
+      id: "expired-critical",
+      level: "critical",
+      title: "Expiraciones elevadas",
+      detail: `${metrics.expiredRequests} solicitudes expiraron. La cobertura operativa no esta alcanzando.`
+    });
+  } else if (metrics.expiredRequests > 0) {
+    alerts.push({
+      id: "expired-watch",
+      level: "watch",
+      title: "Expiraciones detectadas",
+      detail: `${metrics.expiredRequests} solicitudes expiraron y conviene revisar zonas o oferta activa.`
+    });
+  } else {
+    alerts.push({
+      id: "expired-ok",
+      level: "healthy",
+      title: "Sin expiraciones recientes",
+      detail: "No hay solicitudes expiradas en el snapshot actual."
+    });
+  }
+
+  if (metrics.reassignedOffers >= 5) {
+    alerts.push({
+      id: "reassign-critical",
+      level: "critical",
+      title: "Reasignaciones altas",
+      detail: `${metrics.reassignedOffers} ofertas tuvieron que escalar de conductora.`
+    });
+  } else if (metrics.reassignedOffers > 0) {
+    alerts.push({
+      id: "reassign-watch",
+      level: "watch",
+      title: "Reasignaciones presentes",
+      detail: `${metrics.reassignedOffers} ofertas escalaron. Puede haber friccion en aceptacion.`
+    });
+  } else {
+    alerts.push({
+      id: "reassign-ok",
+      level: "healthy",
+      title: "Reasignacion contenida",
+      detail: "No hay escaladas de oferta en el snapshot actual."
+    });
+  }
+
+  return alerts;
+};
+
+const buildOperationalRecommendations = (
+  metrics: CommercialMetricsSnapshot
+) => {
+  const recommendations: Array<{
+    id: string;
+    title: string;
+    action: string;
+    rationale: string;
+    zoneId?: string;
+    driverId?: string;
+  }> = [];
+
+  const hottestZone = metrics.zoneHealth[0];
+  const mostImpactedDriver = metrics.driverAttention[0];
+
+  if (metrics.averageSecondsToMatch >= 120) {
+    recommendations.push({
+      id: "reduce-match-time",
+      title: "Reducir tiempo a match",
+      action: "Revisar cobertura online y reforzar conductoras disponibles en las zonas activas.",
+      rationale: `El tiempo promedio actual es ${metrics.averageSecondsToMatch}s.`
+    });
+  }
+
+  if (metrics.expiredRequests > 0 && hottestZone) {
+    recommendations.push({
+      id: "zone-intervention",
+      title: `Intervenir zona ${hottestZone.zoneName}`,
+      action: "Validar cobertura, radio operativo y balance de oferta en esa zona.",
+      rationale: `${hottestZone.expiredRequests} expiraciones y ${hottestZone.reassignedOffers} reasignaciones.`,
+      zoneId: hottestZone.zoneId
+    });
+  }
+
+  if (metrics.reassignedOffers > 0 && mostImpactedDriver) {
+    recommendations.push({
+      id: "driver-follow-up",
+      title: `Revisar conductora ${mostImpactedDriver.fullName}`,
+      action: "Confirmar si esta tomando ofertas con normalidad o si necesita soporte operativo.",
+      rationale: `${mostImpactedDriver.reassignedAwayOffers} ofertas escalaron despues de haberla incluido en ronda.`,
+      driverId: mostImpactedDriver.driverId
+    });
+  }
+
+  if (metrics.pendingReservedTrips >= 3) {
+    recommendations.push({
+      id: "reservation-pressure",
+      title: "Monitorear reservas pendientes",
+      action: "Seguir la cola en tiempo real y validar si las reservas estan convirtiendo a match o quedan estancadas.",
+      rationale: `${metrics.pendingReservedTrips} solicitudes siguen reservadas ahora mismo.`
+    });
+  }
+
+  if (recommendations.length === 0) {
+    recommendations.push({
+      id: "stable-ops",
+      title: "Operacion estable",
+      action: "Mantener monitoreo pasivo y continuar seguimiento de feed operativo.",
+      rationale: "No hay senales fuertes de friccion en el snapshot actual."
+    });
+  }
+
+  return recommendations;
+};
 
 const sortTrips = (trips: RideTrip[]) =>
   [...trips].sort((a, b) => b.requestedAt.localeCompare(a.requestedAt));
@@ -161,6 +319,9 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [pricingDraft, setPricingDraft] = useState<PricingConfig>(emptyBusiness.pricing);
+  const [zoneDraft, setZoneDraft] = useState<OperationalZone[]>([]);
+  const [selectedZoneFilter, setSelectedZoneFilter] = useState<string | null>(null);
+  const [selectedDriverFilter, setSelectedDriverFilter] = useState<string | null>(null);
   const [promotionDraft, setPromotionDraft] = useState<PromotionUpsertPayload>({
     name: "",
     code: "",
@@ -172,6 +333,42 @@ export default function App() {
     description: "",
     isActive: true
   });
+  const operationalAlerts = buildOperationalAlerts(commercialMetrics);
+  const operationalRecommendations = buildOperationalRecommendations(commercialMetrics);
+  const filteredQueueTrips = snapshot.queueTrips.filter(
+    (trip) =>
+      (!selectedZoneFilter || trip.operationalZoneId === selectedZoneFilter) &&
+      (!selectedDriverFilter ||
+        trip.reservedDriverId === selectedDriverFilter ||
+        trip.driverId === selectedDriverFilter ||
+        trip.offeredDriverIds?.includes(selectedDriverFilter))
+  );
+  const filteredActiveTrips = snapshot.activeTrips.filter(
+    (trip) =>
+      (!selectedZoneFilter || trip.operationalZoneId === selectedZoneFilter) &&
+      (!selectedDriverFilter || trip.driverId === selectedDriverFilter)
+  );
+  const filteredDrivers = directory.drivers.filter(
+    (driver) =>
+      !selectedDriverFilter || driver.id === selectedDriverFilter
+  );
+  const filteredEventStream = eventStream.filter(
+    (event) =>
+      (!selectedZoneFilter ||
+        snapshot.queueTrips
+          .concat(snapshot.activeTrips, snapshot.completedTrips, snapshot.cancelledTrips)
+          .find((trip) => trip.id === event.tripId)?.operationalZoneId === selectedZoneFilter) &&
+      (!selectedDriverFilter ||
+        snapshot.queueTrips
+          .concat(snapshot.activeTrips, snapshot.completedTrips, snapshot.cancelledTrips)
+          .find((trip) => trip.id === event.tripId)?.driverId === selectedDriverFilter ||
+        snapshot.queueTrips
+          .concat(snapshot.activeTrips, snapshot.completedTrips, snapshot.cancelledTrips)
+          .find((trip) => trip.id === event.tripId)?.reservedDriverId === selectedDriverFilter ||
+        snapshot.queueTrips
+          .concat(snapshot.activeTrips, snapshot.completedTrips, snapshot.cancelledTrips)
+          .find((trip) => trip.id === event.tripId)?.offeredDriverIds?.includes(selectedDriverFilter))
+  );
   const socketRef = useRef<WebSocket | null>(null);
   const reconnectTimerRef = useRef<number | null>(null);
   const resourceTimersRef = useRef<Record<string, number | null>>({});
@@ -325,6 +522,7 @@ export default function App() {
     );
     setBusiness(nextBusiness);
     setPricingDraft(nextBusiness.pricing);
+    setZoneDraft(nextBusiness.operationalZones);
   };
 
   const loadCommercialMetrics = async (activeSession: AuthSession) => {
@@ -432,9 +630,18 @@ export default function App() {
             scheduleResourceRefresh("directory", session, () => loadDirectory(session));
             break;
           case "business.refresh":
+            if (
+              payload.auditEntry?.action === "zones_updated" &&
+              !payload.pricing &&
+              !payload.promotion
+            ) {
+              scheduleResourceRefresh("business", session, () => loadBusiness(session));
+              break;
+            }
             if (payload.pricing || payload.promotion || payload.auditEntry) {
               setBusiness((current) => ({
                 pricing: payload.pricing ?? current.pricing,
+                operationalZones: current.operationalZones,
                 promotions: payload.promotion
                   ? [
                       payload.promotion,
@@ -615,6 +822,93 @@ export default function App() {
     }
   };
 
+  const handleZoneChange = (
+    zoneId: string,
+    field: "name" | "radiusKm" | "isActive" | "latitude" | "longitude",
+    value: string | number | boolean
+  ) => {
+    setZoneDraft((current) =>
+      current.map((zone) => {
+        if (zone.id !== zoneId) {
+          return zone;
+        }
+
+        if (field === "latitude") {
+          return {
+            ...zone,
+            center: {
+              ...zone.center,
+              latitude: Number(value)
+            }
+          };
+        }
+
+        if (field === "longitude") {
+          return {
+            ...zone,
+            center: {
+              ...zone.center,
+              longitude: Number(value)
+            }
+          };
+        }
+
+        if (field === "radiusKm") {
+          return {
+            ...zone,
+            radiusKm: Number(value)
+          };
+        }
+
+        if (field === "isActive") {
+          return {
+            ...zone,
+            isActive: Boolean(value)
+          };
+        }
+
+        return {
+          ...zone,
+          name: String(value)
+        };
+      })
+    );
+  };
+
+  const handleAddZone = () => {
+    const zoneCount = zoneDraft.length + 1;
+    setZoneDraft((current) => [
+      ...current,
+      {
+        id: `zone-${Date.now()}`,
+        name: `Zona ${zoneCount}`,
+        center: { latitude: -12.0464, longitude: -77.0428 },
+        radiusKm: 4,
+        isActive: true
+      }
+    ]);
+  };
+
+  const handleRemoveZone = (zoneId: string) => {
+    setZoneDraft((current) => current.filter((zone) => zone.id !== zoneId));
+  };
+
+  const handleSaveZones = async () => {
+    try {
+      const nextBusiness = await authorizedFetch<BusinessRulesSnapshot>("/ops/zones", {
+        method: "POST",
+        body: JSON.stringify({
+          operationalZones: zoneDraft
+        })
+      });
+      setBusiness(nextBusiness);
+      setZoneDraft(nextBusiness.operationalZones);
+      setError(null);
+    } catch {
+      setError("No pudimos guardar las zonas operativas.");
+    }
+  };
+
   const handleCreatePromotion = async () => {
     try {
       await authorizedFetch("/ops/promotions", {
@@ -787,23 +1081,54 @@ export default function App() {
         />
       </section>
 
+      <section className="alertsGrid">
+        {operationalAlerts.map((alert) => (
+          <article key={alert.id} className={`alertCard ${alert.level}`}>
+            <div className="tripRow">
+              <strong>{alert.title}</strong>
+              <span className="badge">{alert.level}</span>
+            </div>
+            <p className="meta">{alert.detail}</p>
+          </article>
+        ))}
+      </section>
+
+      {selectedZoneFilter || selectedDriverFilter ? (
+        <section className="banner">
+          Filtros activos:
+          {selectedZoneFilter ? ` zona ${selectedZoneFilter}` : ""}
+          {selectedDriverFilter ? ` conductora ${selectedDriverFilter}` : ""}
+          <div className="incidentActions">
+            <button
+              className="secondaryAction"
+              onClick={() => {
+                setSelectedZoneFilter(null);
+                setSelectedDriverFilter(null);
+              }}
+            >
+              Limpiar filtros
+            </button>
+          </div>
+        </section>
+      ) : null}
+
       {error ? <section className="banner error">{error}</section> : null}
       {loading ? <section className="banner">Actualizando panel operativo...</section> : null}
 
       <section className="board">
-        <Panel title="Solicitudes" count={snapshot.queueTrips.length}>
-          {snapshot.queueTrips.length === 0 ? (
+        <Panel title="Solicitudes" count={filteredQueueTrips.length}>
+          {filteredQueueTrips.length === 0 ? (
             <p className="empty">No hay solicitudes pendientes.</p>
           ) : (
-            snapshot.queueTrips.map((trip) => <TripCard key={trip.id} trip={trip} accent="queue" />)
+            filteredQueueTrips.map((trip) => <TripCard key={trip.id} trip={trip} accent="queue" />)
           )}
         </Panel>
 
-        <Panel title="Activos" count={snapshot.activeTrips.length}>
-          {snapshot.activeTrips.length === 0 ? (
+        <Panel title="Activos" count={filteredActiveTrips.length}>
+          {filteredActiveTrips.length === 0 ? (
             <p className="empty">No hay viajes activos.</p>
           ) : (
-            snapshot.activeTrips.map((trip) => <TripCard key={trip.id} trip={trip} accent="active" />)
+            filteredActiveTrips.map((trip) => <TripCard key={trip.id} trip={trip} accent="active" />)
           )}
         </Panel>
 
@@ -851,11 +1176,11 @@ export default function App() {
           )}
         </Panel>
 
-        <Panel title="Conductoras" count={directory.drivers.length}>
-          {directory.drivers.length === 0 ? (
+        <Panel title="Conductoras" count={filteredDrivers.length}>
+          {filteredDrivers.length === 0 ? (
             <p className="empty">No hay conductoras registradas.</p>
           ) : (
-            directory.drivers.map((driver) => (
+            filteredDrivers.map((driver) => (
               <section key={driver.id} className="tripCard active">
                 <div className="tripRow">
                   <strong>{driver.fullName}</strong>
@@ -970,10 +1295,112 @@ export default function App() {
                 onChange={(event) => handlePricingChange("surgeMultiplier", event.target.value)}
               />
             </label>
+            <label>
+              <span>Payout conductora</span>
+              <input
+                className="authInput"
+                type="number"
+                step="0.01"
+                min="0.1"
+                max="1"
+                value={pricingDraft.driverPayoutRate}
+                onChange={(event) => handlePricingChange("driverPayoutRate", event.target.value)}
+              />
+            </label>
           </section>
           <button className="primaryAction" onClick={handleSavePricing}>
             Guardar pricing
           </button>
+        </Panel>
+        <Panel
+          title="Zonas operativas"
+          count={zoneDraft.filter((zone) => zone.isActive).length}
+        >
+          <div className="promoList">
+            {zoneDraft.map((zone) => (
+              <section key={zone.id} className="tripCard active">
+                <div className="tripRow">
+                  <strong>{zone.name}</strong>
+                  <span className="badge">{zone.isActive ? "activa" : "pausada"}</span>
+                </div>
+                <section className="formGrid">
+                  <label>
+                    <span>Nombre</span>
+                    <input
+                      className="authInput"
+                      value={zone.name}
+                      onChange={(event) =>
+                        handleZoneChange(zone.id, "name", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>Latitud</span>
+                    <input
+                      className="authInput"
+                      type="number"
+                      step="0.0001"
+                      value={zone.center.latitude}
+                      onChange={(event) =>
+                        handleZoneChange(zone.id, "latitude", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>Longitud</span>
+                    <input
+                      className="authInput"
+                      type="number"
+                      step="0.0001"
+                      value={zone.center.longitude}
+                      onChange={(event) =>
+                        handleZoneChange(zone.id, "longitude", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label>
+                    <span>Radio km</span>
+                    <input
+                      className="authInput"
+                      type="number"
+                      step="0.1"
+                      min="0.1"
+                      value={zone.radiusKm}
+                      onChange={(event) =>
+                        handleZoneChange(zone.id, "radiusKm", event.target.value)
+                      }
+                    />
+                  </label>
+                  <label className="toggleLabel">
+                    <span>Activa</span>
+                    <input
+                      type="checkbox"
+                      checked={zone.isActive}
+                      onChange={(event) =>
+                        handleZoneChange(zone.id, "isActive", event.target.checked)
+                      }
+                    />
+                  </label>
+                </section>
+                <div className="incidentActions">
+                  <button
+                    className="secondaryAction"
+                    onClick={() => handleRemoveZone(zone.id)}
+                  >
+                    Eliminar
+                  </button>
+                </div>
+              </section>
+            ))}
+          </div>
+          <div className="incidentActions">
+            <button className="secondaryAction" onClick={handleAddZone}>
+              Agregar zona
+            </button>
+            <button className="primaryAction" onClick={handleSaveZones}>
+              Guardar zonas
+            </button>
+          </div>
         </Panel>
         <Panel title="Promociones" count={business.promotions.length}>
           <section className="formGrid">
@@ -1169,6 +1596,19 @@ export default function App() {
             <p className="meta">Viajes completados: {commercialMetrics.completedTrips}</p>
             <p className="meta">Viajes cancelados: {commercialMetrics.cancelledTrips}</p>
           </section>
+          <section className="tripCard queue">
+            <p className="meta">Viajes con match: {commercialMetrics.matchedTrips}</p>
+            <p className="meta">Solicitudes expiradas: {commercialMetrics.expiredRequests}</p>
+            <p className="meta">
+              Solicitudes hoy reservadas: {commercialMetrics.pendingReservedTrips}
+            </p>
+            <p className="meta">
+              Reasignaciones de oferta: {commercialMetrics.reassignedOffers}
+            </p>
+            <p className="meta">
+              Tiempo promedio a match: {commercialMetrics.averageSecondsToMatch}s
+            </p>
+          </section>
           {commercialMetrics.promoPerformance.length === 0 ? (
             <p className="empty">Aun no hay promociones utilizadas.</p>
           ) : (
@@ -1186,18 +1626,84 @@ export default function App() {
           )}
         </Panel>
 
-        <Panel title="Feed operativo" count={eventStream.length}>
-          {eventStream.length === 0 ? (
+        <Panel title="Friccion por zona" count={commercialMetrics.zoneHealth.length}>
+          {commercialMetrics.zoneHealth.length === 0 ? (
+            <p className="empty">Aun no hay zonas con senales operativas.</p>
+          ) : (
+            commercialMetrics.zoneHealth.slice(0, 5).map((zone) => (
+              <section key={zone.zoneId} className="tripCard queue">
+                <div className="tripRow">
+                  <strong>{zone.zoneName}</strong>
+                  <span className="badge">{zone.zoneId}</span>
+                </div>
+                <p className="meta">Solicitudes activas: {zone.requestedTrips}</p>
+                <p className="meta">Reservas pendientes: {zone.pendingReservations}</p>
+                <p className="meta">Expiraciones: {zone.expiredRequests}</p>
+                <p className="meta">Reasignaciones: {zone.reassignedOffers}</p>
+              </section>
+            ))
+          )}
+        </Panel>
+
+        <Panel title="Conductoras a revisar" count={commercialMetrics.driverAttention.length}>
+          {commercialMetrics.driverAttention.length === 0 ? (
+            <p className="empty">No hay conductoras con friccion visible ahora mismo.</p>
+          ) : (
+            commercialMetrics.driverAttention.slice(0, 5).map((driver) => (
+              <section key={driver.driverId} className="tripCard active">
+                <div className="tripRow">
+                  <strong>{driver.fullName}</strong>
+                  <span className="badge">{driver.driverId}</span>
+                </div>
+                <p className="meta">Reservas activas: {driver.activeReservations}</p>
+                <p className="meta">Ofertas que escalaron: {driver.reassignedAwayOffers}</p>
+                <p className="meta">
+                  Zona actual de oferta: {driver.currentOfferZoneId ?? "sin zona activa"}
+                </p>
+              </section>
+            ))
+          )}
+        </Panel>
+
+        <Panel title="Acciones sugeridas" count={operationalRecommendations.length}>
+          {operationalRecommendations.map((recommendation) => (
+            <section key={recommendation.id} className="tripCard done">
+              <div className="tripRow">
+                <strong>{recommendation.title}</strong>
+                <span className="badge">accion</span>
+              </div>
+              <p className="route">{recommendation.action}</p>
+              <p className="meta">{recommendation.rationale}</p>
+              <div className="incidentActions">
+                <button
+                  className="secondaryAction"
+                  onClick={() => {
+                    setSelectedZoneFilter(recommendation.zoneId ?? null);
+                    setSelectedDriverFilter(recommendation.driverId ?? null);
+                  }}
+                >
+                  Enfocar panel
+                </button>
+              </div>
+            </section>
+          ))}
+        </Panel>
+
+        <Panel title="Feed operativo" count={filteredEventStream.length}>
+          {filteredEventStream.length === 0 ? (
             <p className="empty">Aun no hay eventos operativos.</p>
           ) : (
-            eventStream.map((event) => (
+            filteredEventStream.map((event) => (
               <section key={event.id} className="tripCard active">
                 <div className="tripRow">
-                  <strong>{event.type}</strong>
+                  <strong>{formatEventLabel(event)}</strong>
                   <span className="badge">{event.actorRole ?? "system"}</span>
                 </div>
                 <p className="route">{event.message}</p>
                 <p className="meta">Trip: {event.tripId}</p>
+                {event.type === "trip_offer_reassigned" ? (
+                  <p className="meta">Matching: la oferta escalo a otra conductora elegible.</p>
+                ) : null}
                 <p className="meta">{new Date(event.occurredAt).toLocaleString()}</p>
               </section>
             ))
@@ -1244,6 +1750,11 @@ function TripCard({
   trip: RideTrip;
   accent: "queue" | "active" | "done";
 }) {
+  const hasActiveReservation =
+    trip.status === "requested" &&
+    Boolean(trip.reservedDriverId && trip.reservedUntil) &&
+    new Date(trip.reservedUntil!).getTime() > Date.now();
+
   return (
     <section className={`tripCard ${accent}`}>
       <div className="tripRow">
@@ -1254,7 +1765,23 @@ function TripCard({
         {trip.origin.label} {"->"} {trip.destination.label}
       </p>
       <p className="meta">{formatMoney(trip)} - {trip.estimate.durationMinutes} min</p>
+      {trip.operationalZoneId ? (
+        <p className="meta">Zona: {trip.operationalZoneId}</p>
+      ) : null}
       <p className="meta">Conductora: {trip.driverName ?? "Sin asignar"}</p>
+      {trip.status === "requested" ? (
+        <>
+          <p className="meta">
+            Oferta: {hasActiveReservation ? "reservada" : "sin reserva activa"}
+          </p>
+          <p className="meta">
+            Destino actual de oferta: {trip.reservedDriverId ?? "sin conductora fija"}
+          </p>
+          <p className="meta">
+            Conductoras ofertadas en ronda: {trip.offeredDriverIds?.length ?? 0}
+          </p>
+        </>
+      ) : null}
       <p className="meta">Solicitado: {new Date(trip.requestedAt).toLocaleTimeString()}</p>
     </section>
   );

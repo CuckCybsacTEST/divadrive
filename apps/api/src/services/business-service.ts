@@ -1,11 +1,14 @@
 import type {
   BusinessAuditEntry,
   BusinessRulesSnapshot,
+  Coordinates,
+  OperationalZone,
   PricingConfig,
   RideEstimate,
   RideEstimateRequest,
   AuthSession
 } from "@diva-drive/domain";
+import { resolveOperationalZoneForRoute } from "@diva-drive/domain";
 import type { BusinessRepository, TripRepository } from "../repositories/contracts.js";
 
 interface BusinessServiceDependencies {
@@ -16,6 +19,7 @@ interface BusinessServiceDependencies {
     | "getSnapshot"
     | "hydrateSnapshot"
     | "listBusinessAuditEntries"
+    | "listOperationalZones"
     | "listPromotions"
   >;
   tripRepository: Pick<TripRepository, "listTripsByPassenger">;
@@ -31,6 +35,14 @@ export const createBusinessService = ({
 
   const hydrateBusinessState = (snapshot: BusinessRulesSnapshot) =>
     businessRepository.hydrateSnapshot(snapshot);
+
+  const listOperationalZones = (): OperationalZone[] => businessRepository.listOperationalZones();
+
+  const resolveOperationalZone = (
+    origin: Coordinates,
+    destination: Coordinates
+  ): OperationalZone | null =>
+    resolveOperationalZoneForRoute(origin, destination, businessRepository.listOperationalZones());
 
   const appendBusinessAudit = (
     session: AuthSession,
@@ -180,6 +192,8 @@ export const createBusinessService = ({
     appendBusinessAudit,
     estimateRide,
     getBusinessSnapshot,
-    hydrateBusinessState
+    hydrateBusinessState,
+    listOperationalZones,
+    resolveOperationalZone
   };
 };

@@ -87,6 +87,8 @@ Actualmente el repositorio ya ofrece:
 - expiracion automatica de solicitudes no atendidas
 - cola de solicitudes priorizada por proximidad
 - reserva temporal de solicitudes para reducir competencia simultanea
+- zonas operativas configurables con restriccion real de solicitud y aceptacion
+- ingresos basicos de conductora con payout configurable desde operaciones
 - panel operativo con viajes, incidencias, directorio, pricing y promociones
 
-Las brechas principales ya no estan en el esqueleto del producto, sino en endurecimiento operativo: zonas, ingresos, persistencia plenamente consistente, observabilidad y reglas mas fuertes de asignacion.
+Las brechas principales ya no estan en el esqueleto del producto, sino en endurecimiento operativo: asignacion mas fuerte, persistencia plenamente consistente, observabilidad y expansion de controles operativos.

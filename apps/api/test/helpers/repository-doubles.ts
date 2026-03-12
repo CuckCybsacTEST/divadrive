@@ -1,6 +1,7 @@
 import type {
   BusinessAuditEntry,
   DriverProfile,
+  OperationalZone,
   PassengerProfile,
   PricingConfig,
   Promotion,
@@ -55,6 +56,7 @@ export const createBusinessRepositoryDouble = (
   overrides: Partial<BusinessRepository> = {}
 ): BusinessRepository => {
   let currentPricing = pricing;
+  let operationalZones: OperationalZone[] = [];
   const promotions: Promotion[] = [];
   const auditLog: BusinessAuditEntry[] = [];
 
@@ -64,6 +66,10 @@ export const createBusinessRepositoryDouble = (
       auditLog.unshift(entry);
       return entry;
     },
+    cacheOperationalZones: (zones) => {
+      operationalZones = [...zones];
+      return zones;
+    },
     cachePricingConfig: (config) => {
       currentPricing = config;
       return config;
@@ -72,14 +78,17 @@ export const createBusinessRepositoryDouble = (
       promotions.push(promotion);
       return promotion;
     },
+    getOperationalZones: () => [...operationalZones],
     getPricingConfig: () => currentPricing,
     getSnapshot: () => ({
       pricing: currentPricing,
+      operationalZones: [...operationalZones],
       promotions: [...promotions].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
       auditLog: [...auditLog].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt))
     }),
     hydrateSnapshot: (snapshot) => {
       currentPricing = snapshot.pricing;
+      operationalZones = [...snapshot.operationalZones];
       promotions.length = 0;
       promotions.push(...snapshot.promotions);
       auditLog.length = 0;
@@ -88,7 +97,9 @@ export const createBusinessRepositoryDouble = (
     },
     listBusinessAuditEntries: () =>
       [...auditLog].sort((a, b) => b.occurredAt.localeCompare(a.occurredAt)),
+    listOperationalZones: () => [...operationalZones],
     listPromotions: () => [...promotions].sort((a, b) => b.createdAt.localeCompare(a.createdAt)),
+    saveOperationalZones: async (zones) => zones,
     savePricingConfig: async (config) => config,
     savePromotion: async (promotion) => promotion,
     ...overrides

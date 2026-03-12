@@ -178,7 +178,11 @@ test("critical flow covers auth, approval, trip lifecycle and incident resolutio
     url: "/driver/availability",
     token: driverSignUp.body.accessToken,
     payload: {
-      availabilityStatus: "online"
+      availabilityStatus: "online",
+      currentLocation: {
+        latitude: -12.1317,
+        longitude: -77.0301
+      }
     }
   });
   assert.equal(driverOnline.statusCode, 200);
@@ -212,6 +216,43 @@ test("critical flow covers auth, approval, trip lifecycle and incident resolutio
   assert.equal(tripCreate.statusCode, 201);
   assert.equal(tripCreate.body.status, "requested");
 
+  const outOfZoneTrip = await request<{ error: string }>(server, {
+    method: "POST",
+    url: "/trips",
+    token: passengerSignUp.body.accessToken,
+    payload: {
+      passengerId: passengerSignUp.body.user.id,
+      passengerName: passengerSignUp.body.user.fullName,
+      origin: {
+        label: "Chancay",
+        address: "Zona fuera de operacion",
+        latitude: -11.56,
+        longitude: -77.27
+      },
+      destination: {
+        label: "Huacho",
+        address: "Zona fuera de operacion",
+        latitude: -11.11,
+        longitude: -77.61
+      }
+    }
+  });
+  assert.equal(outOfZoneTrip.statusCode, 403);
+  assert.equal(outOfZoneTrip.body.error, "trip_outside_operational_zone");
+
+  const driverQueue = await request<{ trips: Array<{ id: string; reservedDriverId?: string }> }>(
+    server,
+    {
+      method: "GET",
+      url: "/driver/trips/queue",
+      token: driverSignUp.body.accessToken
+    }
+  );
+  assert.equal(driverQueue.statusCode, 200);
+  assert.equal(driverQueue.body.trips.length, 1);
+  assert.equal(driverQueue.body.trips[0]?.id, tripCreate.body.id);
+  assert.equal(driverQueue.body.trips[0]?.reservedDriverId, driverSignUp.body.user.id);
+
   const acceptTrip = await request<{ status: string }>(server, {
     method: "POST",
     url: `/driver/trips/${tripCreate.body.id}/accept`,
@@ -239,6 +280,25 @@ test("critical flow covers auth, approval, trip lifecycle and incident resolutio
     assert.equal(update.statusCode, 200);
     assert.equal(update.body.status, status);
   }
+
+  const driverEarnings = await request<{
+    completedTrips: number;
+    grossEarnings: number;
+    platformFees: number;
+    netEarnings: number;
+  }>(server, {
+    method: "GET",
+    url: "/driver/earnings",
+    token: driverSignUp.body.accessToken
+  });
+  assert.equal(driverEarnings.statusCode, 200);
+  assert.equal(driverEarnings.body.completedTrips, 1);
+  assert.ok(driverEarnings.body.grossEarnings > 0);
+  assert.equal(
+    Number((driverEarnings.body.netEarnings + driverEarnings.body.platformFees).toFixed(2)),
+    driverEarnings.body.grossEarnings
+  );
+  assert.ok(driverEarnings.body.netEarnings >= 0);
 
   const incident = await request<{ id: string; status: string }>(server, {
     method: "POST",
@@ -436,6 +496,24 @@ test("authorization and transition guards reject invalid actors and invalid stat
   assert.equal(goOnline.statusCode, 200);
   assert.equal(goOnline.body.availabilityStatus, "online");
 
+  const acceptWithoutReservation = await request<{ error: string }>(server, {
+    method: "POST",
+    url: `/driver/trips/${tripCreate.body.id}/accept`,
+    token: unapprovedDriver.body.accessToken,
+    payload: {}
+  });
+  assert.equal(acceptWithoutReservation.statusCode, 409);
+  assert.equal(acceptWithoutReservation.body.error, "trip_reservation_required");
+
+  const driverQueueAfterOnline = await request<{ trips: Array<{ id: string }> }>(server, {
+    method: "GET",
+    url: "/driver/trips/queue",
+    token: unapprovedDriver.body.accessToken
+  });
+  assert.equal(driverQueueAfterOnline.statusCode, 200);
+  assert.equal(driverQueueAfterOnline.body.trips.length, 1);
+  assert.equal(driverQueueAfterOnline.body.trips[0]?.id, tripCreate.body.id);
+
   const acceptedTrip = await request<{ status: string }>(server, {
     method: "POST",
     url: `/driver/trips/${tripCreate.body.id}/accept`,
@@ -504,7 +582,7 @@ test("business endpoints persist pricing, promotions and audit trail", async (t)
   assert.equal(operator.statusCode, 201);
 
   const pricing = await request<{
-    pricing: { currency: string; baseFare: number; surgeMultiplier: number };
+    pricing: { currency: string; baseFare: number; surgeMultiplier: number; driverPayoutRate: number };
     auditLog: Array<{ action: string; actorId: string }>;
   }>(server, {
     method: "POST",
@@ -517,12 +595,14 @@ test("business endpoints persist pricing, promotions and audit trail", async (t)
       perMinuteRate: 0.3,
       minimumFare: 10,
       serviceFee: 1.5,
-      surgeMultiplier: 1.4
+      surgeMultiplier: 1.4,
+      driverPayoutRate: 0.8
     }
   });
   assert.equal(pricing.statusCode, 200);
   assert.equal(pricing.body.pricing.baseFare, 7.5);
   assert.equal(pricing.body.pricing.surgeMultiplier, 1.4);
+  assert.equal(pricing.body.pricing.driverPayoutRate, 0.8);
   assert.ok(
     pricing.body.auditLog.some(
       (entry) => entry.action === "pricing_updated" && entry.actorId === operator.body.user.id
@@ -578,7 +658,7 @@ test("business endpoints persist pricing, promotions and audit trail", async (t)
   assert.equal(updatedPromotion.body.isActive, false);
 
   const businessSnapshot = await request<{
-    pricing: { baseFare: number; surgeMultiplier: number };
+    pricing: { baseFare: number; surgeMultiplier: number; driverPayoutRate: number };
     promotions: Array<{ id: string; isActive: boolean; description: string }>;
     auditLog: Array<{ action: string; actorId: string }>;
   }>(server, {
