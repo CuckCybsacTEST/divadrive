@@ -3,6 +3,7 @@ import type {
   BusinessAuditEntry,
   BusinessRulesSnapshot,
   DriverProfile,
+  InternalUserProfile,
   OperationalZone,
   PassengerProfile,
   PricingConfig,
@@ -33,13 +34,17 @@ export interface TripRepository {
 
 export interface DirectoryRepository {
   cacheDriverProfile(profile: DriverProfile): DriverProfile;
+  cacheInternalUserProfile(profile: InternalUserProfile): InternalUserProfile;
   cachePassengerProfile(profile: PassengerProfile): PassengerProfile;
   getDriverProfileById(driverId: string): Promise<DriverProfile | null>;
+  getInternalUserProfileById(internalUserId: string): Promise<InternalUserProfile | null>;
   getPassengerProfileById(passengerId: string): Promise<PassengerProfile | null>;
   hydrateSnapshot(payload: AdminDirectorySnapshot): AdminDirectorySnapshot;
   listDriverProfiles(): Promise<DriverProfile[]>;
+  listInternalUserProfiles(): Promise<InternalUserProfile[]>;
   listPassengerProfiles(): Promise<PassengerProfile[]>;
   saveDriverProfile(profile: DriverProfile): Promise<DriverProfile>;
+  saveInternalUserProfile(profile: InternalUserProfile): Promise<InternalUserProfile>;
   savePassengerProfile(profile: PassengerProfile): Promise<PassengerProfile>;
 }
 
@@ -64,7 +69,7 @@ export interface BusinessRepository {
 export type TripWriteRepository = Pick<TripRepository, "saveIncident" | "saveTrip">;
 export type DirectoryWriteRepository = Pick<
   DirectoryRepository,
-  "saveDriverProfile" | "savePassengerProfile"
+  "saveDriverProfile" | "saveInternalUserProfile" | "savePassengerProfile"
 >;
 export type BusinessWriteRepository = Pick<
   BusinessRepository,

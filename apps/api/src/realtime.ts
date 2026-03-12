@@ -10,6 +10,7 @@ import type {
   RideTrip,
   TripTimelineEvent,
   DriverProfile,
+  InternalUserProfile,
   PassengerProfile,
   PricingConfig,
   Promotion,
@@ -184,6 +185,7 @@ export const createSupabaseRealtimeBridge = (options: {
     userId?: string;
     reason: string;
     driverProfile?: DriverProfile;
+    internalUserProfile?: InternalUserProfile;
     passengerProfile?: PassengerProfile;
   }) => Promise<void> | void;
   onBusinessChanged: (payload: {
@@ -198,6 +200,7 @@ export const createSupabaseRealtimeBridge = (options: {
   resolveTrip: (tripId: string) => Promise<RideTrip | null>;
   resolveTimelineEvent: (eventId: string) => Promise<TripTimelineEvent | null>;
   resolveDriverProfile: (driverId: string) => Promise<DriverProfile | null>;
+  resolveInternalUserProfile: (internalUserId: string) => Promise<InternalUserProfile | null>;
   resolvePassengerProfile: (passengerId: string) => Promise<PassengerProfile | null>;
   resolvePricing: () => Promise<PricingConfig>;
   resolvePromotion: (promotionId: string) => Promise<Promotion | null>;
@@ -344,6 +347,28 @@ export const createSupabaseRealtimeBridge = (options: {
           userId,
           reason: `supabase_passenger_profiles_${payload.eventType.toLowerCase()}`,
           passengerProfile: passengerProfile ?? undefined
+        });
+      });
+    });
+
+    subscribe("internal_user_profiles", (payload) => {
+      const row = (payload.eventType === "DELETE" ? payload.old : payload.new) as Record<
+        string,
+        unknown
+      >;
+      const userId = typeof row.id === "string" ? row.id : undefined;
+      if (!userId) {
+        return;
+      }
+
+      void (payload.eventType === "DELETE"
+        ? Promise.resolve(null)
+        : options.resolveInternalUserProfile(userId)
+      ).then((internalUserProfile) => {
+        void options.onDirectoryChanged({
+          userId,
+          reason: `supabase_internal_user_profiles_${payload.eventType.toLowerCase()}`,
+          internalUserProfile: internalUserProfile ?? undefined
         });
       });
     });

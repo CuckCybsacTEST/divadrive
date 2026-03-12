@@ -80,6 +80,7 @@ export interface SessionUser {
 
 export type DriverApprovalStatus = "pending" | "approved" | "rejected";
 export type DriverAvailabilityStatus = "offline" | "online";
+export type DriverOperationalStatus = "active" | "blocked";
 
 export interface DriverProfile {
   id: string;
@@ -87,12 +88,16 @@ export interface DriverProfile {
   phone: string;
   city: string;
   approvalStatus: DriverApprovalStatus;
+  operationalStatus: DriverOperationalStatus;
   availabilityStatus?: DriverAvailabilityStatus;
   lastKnownLocation?: Coordinates;
   lastLocationAt?: string;
   documentsSubmitted: boolean;
   licenseNumber: string;
   vehicleDescription: string;
+  reviewNotes?: string;
+  reviewedAt?: string;
+  reviewedBy?: string;
   createdAt: string;
 }
 
@@ -101,6 +106,17 @@ export interface PassengerProfile {
   fullName: string;
   phone: string;
   city: string;
+  createdAt: string;
+}
+
+export interface InternalUserProfile {
+  id: string;
+  role: Extract<UserRole, "operator" | "admin">;
+  fullName: string;
+  phone: string;
+  email: string;
+  city: string;
+  isActive: boolean;
   createdAt: string;
 }
 
@@ -139,6 +155,7 @@ export interface RealtimeEnvelope {
   notification?: OperationalNotification;
   driverProfile?: DriverProfile;
   passengerProfile?: PassengerProfile;
+  internalUserProfile?: InternalUserProfile;
   pricing?: PricingConfig;
   promotion?: Promotion;
   auditEntry?: BusinessAuditEntry;
@@ -429,10 +446,28 @@ export interface BusinessAuditEntry {
 export interface AdminDirectorySnapshot {
   drivers: DriverProfile[];
   passengers: PassengerProfile[];
+  internalUsers: InternalUserProfile[];
+}
+
+export interface InternalUserCreatePayload {
+  email: string;
+  password: string;
+  fullName: string;
+  phone: string;
+  role: InternalUserProfile["role"];
+}
+
+export interface InternalUserStatusUpdate {
+  isActive: boolean;
 }
 
 export interface DriverApprovalUpdate {
   approvalStatus: DriverApprovalStatus;
+}
+
+export interface DriverOperationalUpdate {
+  operationalStatus: DriverOperationalStatus;
+  reviewNotes?: string;
 }
 
 export interface DriverAvailabilityUpdate {

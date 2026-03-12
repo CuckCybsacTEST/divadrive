@@ -204,7 +204,10 @@ export const createOpsService = ({
       );
 
     const driverAttention: DriverAttentionSnapshot[] = driverProfiles
-      .filter((driver) => driver.approvalStatus === "approved")
+      .filter(
+        (driver) =>
+          driver.approvalStatus === "approved" && driver.operationalStatus === "active"
+      )
       .map((driver) => {
         const currentlyReservedTrips = allTrips.filter(
           (trip) =>

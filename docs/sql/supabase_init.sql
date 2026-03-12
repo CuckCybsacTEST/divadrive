@@ -30,9 +30,29 @@ create table if not exists driver_profiles (
   phone text not null,
   city text not null,
   approval_status text not null check (approval_status in ('pending', 'approved', 'rejected')),
+  operational_status text not null default 'active' check (operational_status in ('active', 'blocked')),
   documents_submitted boolean not null default false,
   license_number text not null,
   vehicle_description text not null,
+  review_notes text,
+  reviewed_at timestamptz,
+  reviewed_by text,
+  created_at timestamptz not null default timezone('utc', now())
+);
+
+alter table driver_profiles add column if not exists operational_status text not null default 'active';
+alter table driver_profiles add column if not exists review_notes text;
+alter table driver_profiles add column if not exists reviewed_at timestamptz;
+alter table driver_profiles add column if not exists reviewed_by text;
+
+create table if not exists internal_user_profiles (
+  id text primary key,
+  role text not null check (role in ('operator', 'admin')),
+  full_name text not null,
+  phone text not null,
+  email text not null,
+  city text not null,
+  is_active boolean not null default true,
   created_at timestamptz not null default timezone('utc', now())
 );
 
@@ -129,6 +149,7 @@ create table if not exists business_audit_log (
 
 alter table passenger_profiles enable row level security;
 alter table driver_profiles enable row level security;
+alter table internal_user_profiles enable row level security;
 alter table trips enable row level security;
 alter table trip_incidents enable row level security;
 alter table trip_events enable row level security;
@@ -147,6 +168,13 @@ using (id = auth.uid()::text or public.is_ops_role());
 drop policy if exists driver_profiles_role_read on driver_profiles;
 create policy driver_profiles_role_read
 on driver_profiles
+for select
+to authenticated
+using (id = auth.uid()::text or public.is_ops_role());
+
+drop policy if exists internal_user_profiles_ops_read on internal_user_profiles;
+create policy internal_user_profiles_ops_read
+on internal_user_profiles
 for select
 to authenticated
 using (id = auth.uid()::text or public.is_ops_role());
@@ -229,6 +257,7 @@ using (false);
 
 alter publication supabase_realtime add table passenger_profiles;
 alter publication supabase_realtime add table driver_profiles;
+alter publication supabase_realtime add table internal_user_profiles;
 alter publication supabase_realtime add table trips;
 alter publication supabase_realtime add table trip_incidents;
 alter publication supabase_realtime add table trip_events;

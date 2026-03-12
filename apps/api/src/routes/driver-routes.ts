@@ -56,6 +56,10 @@ export const registerDriverRoutes = (context: DriverRoutesContext) => {
       }
       const currentDriverProfile = driverProfile as DriverProfile;
 
+      if (payload.availabilityStatus === "online" && currentDriverProfile.operationalStatus !== "active") {
+        apiError(403, "driver_blocked");
+      }
+
       if (payload.availabilityStatus === "online" && currentDriverProfile.approvalStatus !== "approved") {
         apiError(403, "driver_not_approved");
       }
@@ -86,7 +90,11 @@ export const registerDriverRoutes = (context: DriverRoutesContext) => {
     );
     const driverProfile = await getDriverProfileById(session.user.id);
 
-    if (!driverProfile || driverProfile.availabilityStatus !== "online") {
+    if (
+      !driverProfile ||
+      driverProfile.operationalStatus !== "active" ||
+      driverProfile.availabilityStatus !== "online"
+    ) {
       return {
         trips: []
       };
@@ -133,6 +141,10 @@ export const registerDriverRoutes = (context: DriverRoutesContext) => {
         apiError(403, "driver_not_approved");
       }
       const currentDriverProfile = driverProfile as DriverProfile;
+
+      if (currentDriverProfile.operationalStatus !== "active") {
+        apiError(403, "driver_blocked");
+      }
 
       if (currentDriverProfile.availabilityStatus !== "online") {
         apiError(403, "driver_offline");
@@ -218,6 +230,11 @@ export const registerDriverRoutes = (context: DriverRoutesContext) => {
         apiError(404, "trip_not_found_for_driver");
       }
       const currentTrip = trip as RideTrip;
+      const driverProfile = await getDriverProfileById(session.user.id);
+
+      if (!driverProfile || driverProfile.operationalStatus !== "active") {
+        apiError(403, "driver_blocked");
+      }
 
       const parsedPayload = driverStatusSchema.safeParse(request.body);
 

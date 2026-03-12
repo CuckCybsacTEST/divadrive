@@ -1,6 +1,7 @@
 import type {
   BusinessAuditEntry,
   DriverProfile,
+  InternalUserProfile,
   OperationalNotification,
   PassengerProfile,
   PricingConfig,
@@ -22,6 +23,7 @@ type RealtimePublishEvent = Omit<RealtimeEnvelope, "id" | "occurredAt"> & {
   timelineEvent?: TripTimelineEvent;
   notification?: OperationalNotification;
   driverProfile?: DriverProfile;
+  internalUserProfile?: InternalUserProfile;
   passengerProfile?: PassengerProfile;
   pricing?: PricingConfig;
   promotion?: Promotion;
@@ -43,6 +45,8 @@ interface RealtimeServiceDependencies {
   hydrateEvent: (event: TripTimelineEvent) => TripTimelineEvent;
   getDriverProfile: (driverId: string) => Promise<DriverProfile | null>;
   hydrateDriverProfile: (profile: DriverProfile) => DriverProfile;
+  getInternalUserProfile: (internalUserId: string) => Promise<InternalUserProfile | null>;
+  hydrateInternalUserProfile: (profile: InternalUserProfile) => InternalUserProfile;
   getPassengerProfile: (passengerId: string) => Promise<PassengerProfile | null>;
   hydratePassengerProfile: (profile: PassengerProfile) => PassengerProfile;
   getPricingConfig: () => Promise<PricingConfig>;
@@ -94,6 +98,8 @@ export const createRealtimeService = ({
   hydrateEvent,
   getDriverProfile,
   hydrateDriverProfile,
+  getInternalUserProfile,
+  hydrateInternalUserProfile,
   getPassengerProfile,
   hydratePassengerProfile,
   getPricingConfig,
@@ -303,7 +309,11 @@ export const createRealtimeService = ({
   const publishDirectoryRealtime = (
     reason: string,
     targets?: { userIds?: string[] },
-    payload?: { driverProfile?: DriverProfile; passengerProfile?: PassengerProfile }
+    payload?: {
+      driverProfile?: DriverProfile;
+      internalUserProfile?: InternalUserProfile;
+      passengerProfile?: PassengerProfile;
+    }
   ) => {
     publishRealtime({ type: "ops.directory.refresh", reason, ...payload }, { ops: true });
 
@@ -340,12 +350,13 @@ export const createRealtimeService = ({
     onTripTimelineChanged: (payload) => {
       publishTripTimelineRealtimeByAudience(payload);
     },
-    onDirectoryChanged: ({ userId, reason, driverProfile, passengerProfile }) => {
+    onDirectoryChanged: ({ userId, reason, driverProfile, internalUserProfile, passengerProfile }) => {
       publishDirectoryRealtime(
         reason,
         userId ? { userIds: [userId] } : undefined,
         {
           driverProfile,
+          internalUserProfile,
           passengerProfile
         }
       );
@@ -378,6 +389,10 @@ export const createRealtimeService = ({
     resolveDriverProfile: async (driverId) => {
       const profile = await getDriverProfile(driverId);
       return profile ? hydrateDriverProfile(profile) : null;
+    },
+    resolveInternalUserProfile: async (internalUserId) => {
+      const profile = await getInternalUserProfile(internalUserId);
+      return profile ? hydrateInternalUserProfile(profile) : null;
     },
     resolvePassengerProfile: async (passengerId) => {
       const profile = await getPassengerProfile(passengerId);

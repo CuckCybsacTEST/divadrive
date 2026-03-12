@@ -81,14 +81,17 @@ Una base de software real, mantenible y ampliable, apta para ser construida paso
 Actualmente el repositorio ya ofrece:
 
 - autenticacion y sesiones desde backend
+- fallback local de autenticacion para desarrollo cuando Supabase no esta disponible
 - flujo principal de viaje extremo a extremo bajo supervision
 - onboarding y aprobacion operativa de conductoras
-- cambio `online/offline` de conductora
+- bloqueo/reactivacion operativa de conductoras con nota de revision
+- cambio `online/offline` de conductora solo para conductoras aprobadas y activas
 - expiracion automatica de solicitudes no atendidas
 - cola de solicitudes priorizada por proximidad
 - reserva temporal de solicitudes para reducir competencia simultanea
 - zonas operativas configurables con restriccion real de solicitud y aceptacion
 - ingresos basicos de conductora con payout configurable desde operaciones
+- gestion administrativa de usuarios internos `operator/admin`
 - panel operativo con viajes, incidencias, directorio, pricing y promociones
 
 Las brechas principales ya no estan en el esqueleto del producto, sino en endurecimiento operativo: asignacion mas fuerte, persistencia plenamente consistente, observabilidad y expansion de controles operativos.

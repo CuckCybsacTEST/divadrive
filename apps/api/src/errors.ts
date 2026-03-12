@@ -1,8 +1,10 @@
 import type { FastifyReply } from "fastify";
 
 export const API_ERROR_CODES = [
+  "account_inactive",
   "auth_unavailable",
   "driver_already_has_active_trip",
+  "driver_blocked",
   "driver_not_approved",
   "driver_not_found",
   "driver_profile_persistence_failed",
@@ -10,14 +12,17 @@ export const API_ERROR_CODES = [
   "driver_offline",
   "incident_not_found",
   "incident_persistence_failed",
+  "internal_user_not_found",
   "internal_server_error",
   "invalid_cancel_payload",
   "invalid_credentials",
   "invalid_driver_approval_payload",
   "invalid_driver_availability_payload",
+  "invalid_driver_operational_payload",
   "invalid_estimate_payload",
   "invalid_incident_payload",
   "invalid_incident_status_payload",
+  "invalid_internal_user_payload",
   "invalid_places_query",
   "invalid_promotion_payload",
   "invalid_pricing_payload",

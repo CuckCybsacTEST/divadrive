@@ -11,10 +11,14 @@ export const registerAuthRoutes = (context: AuthRoutesContext) => {
     requireSession,
     ensureProfileForSession,
     signInWithSupabase,
+    signInLocally,
     signUpWithSupabase,
+    signUpLocally,
     refreshSupabaseSession,
+    refreshLocalSession,
     isSupabaseReady,
     getDriverProfile,
+    getInternalUserProfile,
     getPassengerProfile,
     publishDirectoryRealtime
   } = context;
@@ -26,10 +30,6 @@ export const registerAuthRoutes = (context: AuthRoutesContext) => {
       apiError(400, "invalid_sign_in_payload");
     }
 
-    if (!isSupabaseReady) {
-      apiError(503, "auth_unavailable");
-    }
-
     const payload = parsedPayload.data as {
       email: string;
       password: string;
@@ -37,15 +37,22 @@ export const registerAuthRoutes = (context: AuthRoutesContext) => {
     };
 
     try {
-      const session = await signInWithSupabase(payload);
+      const session = isSupabaseReady
+        ? await signInWithSupabase(payload)
+        : await signInLocally(payload);
       await ensureProfileForSession(session);
       return session;
     } catch (error) {
       apiError(
-        error instanceof Error && error.message === "role_mismatch" ? 403 : 401,
+        error instanceof Error &&
+          (error.message === "role_mismatch" || error.message === "account_inactive")
+          ? 403
+          : 401,
         error instanceof Error && error.message === "role_mismatch"
           ? "role_mismatch"
-          : "invalid_credentials"
+          : error instanceof Error && error.message === "account_inactive"
+            ? "account_inactive"
+            : "invalid_credentials"
       );
     }
   });
@@ -57,10 +64,6 @@ export const registerAuthRoutes = (context: AuthRoutesContext) => {
       apiError(400, "invalid_sign_up_payload");
     }
 
-    if (!isSupabaseReady) {
-      apiError(503, "auth_unavailable");
-    }
-
     const payload = parsedPayload.data as {
       email: string;
       password: string;
@@ -70,7 +73,9 @@ export const registerAuthRoutes = (context: AuthRoutesContext) => {
     };
 
     try {
-      const session = await signUpWithSupabase(payload);
+      const session = isSupabaseReady
+        ? await signUpWithSupabase(payload)
+        : await signUpLocally(payload);
       await ensureProfileForSession(session);
       publishDirectoryRealtime(
         "sign_up_profile_created",
@@ -81,6 +86,10 @@ export const registerAuthRoutes = (context: AuthRoutesContext) => {
           driverProfile:
             session.user.role === "driver"
               ? (await getDriverProfile(session.user.id)) ?? undefined
+              : undefined,
+          internalUserProfile:
+            session.user.role === "operator" || session.user.role === "admin"
+              ? (await getInternalUserProfile(session.user.id)) ?? undefined
               : undefined,
           passengerProfile:
             session.user.role === "passenger"
@@ -104,18 +113,18 @@ export const registerAuthRoutes = (context: AuthRoutesContext) => {
       apiError(400, "invalid_refresh_payload");
     }
 
-    if (!isSupabaseReady) {
-      apiError(400, "refresh_not_available");
-    }
-
     const payload = parsedPayload.data as {
       refreshToken: string;
     };
 
     try {
-      const session = await refreshSupabaseSession(payload.refreshToken);
-      await ensureProfileForSession(session);
-      return session;
+      const session = isSupabaseReady
+        ? await refreshSupabaseSession(payload.refreshToken)
+        : await refreshLocalSession(payload.refreshToken);
+      const validSession = requireSessionOrThrow(session);
+
+      await ensureProfileForSession(validSession);
+      return validSession;
     } catch {
       apiError(401, "invalid_refresh_token");
     }

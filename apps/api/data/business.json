@@ -6,7 +6,8 @@
     "perMinuteRate": 0.22,
     "minimumFare": 8.5,
     "serviceFee": 1.2,
-    "surgeMultiplier": 1
+    "surgeMultiplier": 1,
+    "driverPayoutRate": 0.82
   },
   "promotions": [
     {
@@ -34,6 +35,18 @@
       "description": "Incentivo fijo para recorridos de mayor valor.",
       "isActive": false,
       "createdAt": "2026-03-10T00:00:00.000Z"
+    }
+  ],
+  "operationalZones": [
+    {
+      "id": "lima-central",
+      "name": "Lima Metropolitana",
+      "center": {
+        "latitude": -12.0464,
+        "longitude": -77.0428
+      },
+      "radiusKm": 18,
+      "isActive": true
     }
   ],
   "auditLog": []

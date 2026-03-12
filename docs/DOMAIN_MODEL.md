@@ -12,6 +12,7 @@ Definir el contrato operativo minimo compartido entre apps, backend y panel.
 ## Entidades base
 - `Passenger`
 - `Driver`
+- `InternalUser`
 - `Vehicle`
 - `Trip`
 - `TripRequest`
@@ -74,6 +75,8 @@ Estados iniciales obligatorios de `Trip`:
 - intervenir ante incidencias
 - cancelar administrativamente cuando sea necesario
 - auditar eventos
+- gestionar acceso de `operator` y `admin`
+- aprobar, rechazar, bloquear o reactivar conductoras
 
 ## Cancelaciones
 Toda cancelacion debe guardar:
@@ -97,16 +100,21 @@ El matching inicial debe considerar como minimo:
 Actualmente el dominio implementado ya cubre:
 
 - estado `online/offline` de conductora
+- estado operativo `active/blocked` de conductora
 - ultima ubicacion conocida de conductora para priorizacion operativa
 - expiracion de solicitudes en `requested`
 - reserva temporal de solicitud para una conductora especifica antes de aceptacion definitiva
 - validacion real por zona operativa para solicitud y aceptacion
 - identificacion de zona operativa asociada al viaje
 - snapshot basico de ingresos de conductora basado en viajes completados y payout operativo
+- perfiles internos persistibles para `operator/admin`
+- directorio administrativo unificado de conductoras, pasajeros y usuarios internos
+- trazabilidad basica de revision operativa sobre conductoras con `reviewNotes`, `reviewedAt` y `reviewedBy`
 
 Todavia no esta completamente implementado:
 
 - asignacion automatica mas fuerte que la cola reservada actual
+- onboarding documental formal de conductoras con estados mas ricos que el booleano actual
 - politicas geograficas mas avanzadas como multi-zona, bordes y reglas horarias
 
 ## Auditoria

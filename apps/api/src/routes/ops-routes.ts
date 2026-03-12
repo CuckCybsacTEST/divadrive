@@ -1,6 +1,6 @@
-import { TRIP_EVENT_TYPES, TRIP_STATUSES, type DriverApprovalUpdate, type IncidentStatusUpdate, type OperationalZoneUpsertPayload, type PricingConfigUpdate, type PromotionUpsertPayload } from "@diva-drive/domain";
+import { TRIP_EVENT_TYPES, TRIP_STATUSES, type DriverApprovalUpdate, type DriverOperationalUpdate, type IncidentStatusUpdate, type InternalUserCreatePayload, type InternalUserProfile, type InternalUserStatusUpdate, type OperationalZoneUpsertPayload, type PricingConfigUpdate, type PromotionUpsertPayload } from "@diva-drive/domain";
 import { SERVICE_NAME } from "@diva-drive/domain";
-import type { DriverProfile, Promotion, TripIncident } from "@diva-drive/domain";
+import type { AuthSession, DriverProfile, Promotion, TripIncident } from "@diva-drive/domain";
 import { appEnv } from "../env.js";
 import { apiError } from "../errors.js";
 import { created, requireSessionOrThrow } from "./helpers.js";
@@ -22,6 +22,7 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
     getCommercialMetrics,
     getOpsEventStream,
     listDriverProfiles,
+    listInternalUserProfiles,
     listPassengerProfiles,
     hydrateDirectoryState,
     readTrips,
@@ -35,8 +36,16 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
     saveIncident,
     publishTripRealtime,
     driverApprovalSchema,
+    driverOperationalSchema,
+    internalUserCreateSchema,
+    internalUserStatusSchema,
     driverProfilesById,
+    internalUserProfilesById,
     saveDriverProfile,
+    saveInternalUserProfile,
+    createInternalUserAccount,
+    getInternalUserProfile,
+    updateInternalUserAuthStatus,
     publishDirectoryRealtime,
     pricingConfigSchema,
     savePricingConfig,
@@ -54,6 +63,14 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
 
   const requireOpsSession = async (authorizationHeader?: string) =>
     requireAnyRole(await requireSession(authorizationHeader), ["operator", "admin"]);
+
+  const requireAdminSession = (session: AuthSession) => {
+    if (session.user.role !== "admin") {
+      apiError(403, "role_mismatch");
+    }
+
+    return session;
+  };
 
   app.get("/health", async () => ({
     service: SERVICE_NAME,
@@ -128,7 +145,8 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
     requireSessionOrThrow(await requireOpsSession(request.headers.authorization));
     return hydrateDirectoryState({
       drivers: await listDriverProfiles(),
-      passengers: await listPassengerProfiles()
+      passengers: await listPassengerProfiles(),
+      internalUsers: await listInternalUserProfiles()
     });
   });
 
@@ -187,7 +205,7 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
   app.post<{ Params: { driverId: string }; Body: DriverApprovalUpdate }>(
     "/ops/drivers/:driverId/approval",
     async (request) => {
-      requireSessionOrThrow(await requireOpsSession(request.headers.authorization));
+      const session = requireSessionOrThrow(await requireOpsSession(request.headers.authorization));
 
       const parsedPayload = driverApprovalSchema.safeParse(request.body);
       if (!parsedPayload.success) {
@@ -200,10 +218,13 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
         apiError(404, "driver_not_found");
       }
       const currentProfile = profile as DriverProfile;
+      const reviewedAt = new Date().toISOString();
 
       const persistedProfile = await saveDriverProfile({
         ...currentProfile,
-        approvalStatus: payload.approvalStatus
+        approvalStatus: payload.approvalStatus,
+        reviewedAt,
+        reviewedBy: session.user.id
       });
       driverProfilesById.set(persistedProfile.id, persistedProfile);
       publishDirectoryRealtime(
@@ -211,6 +232,124 @@ export const registerOpsRoutes = (context: OpsRoutesContext) => {
         { userIds: [persistedProfile.id] },
         { driverProfile: persistedProfile }
       );
+      return persistedProfile;
+    }
+  );
+
+  app.post<{ Params: { driverId: string }; Body: DriverOperationalUpdate }>(
+    "/ops/drivers/:driverId/operations",
+    async (request) => {
+      const session = requireSessionOrThrow(
+        await requireOpsSession(request.headers.authorization)
+      );
+
+      const parsedPayload = driverOperationalSchema.safeParse(request.body);
+      if (!parsedPayload.success) {
+        apiError(400, "invalid_driver_operational_payload");
+      }
+
+      const payload = parsedPayload.data as DriverOperationalUpdate;
+      const profile = driverProfilesById.get(request.params.driverId);
+      if (!profile) {
+        apiError(404, "driver_not_found");
+      }
+      const currentProfile = profile as DriverProfile;
+      const nextReviewNotes =
+        typeof payload.reviewNotes === "string" && payload.reviewNotes.trim().length > 0
+          ? payload.reviewNotes.trim()
+          : undefined;
+
+      const persistedProfile = await saveDriverProfile({
+        ...currentProfile,
+        operationalStatus: payload.operationalStatus,
+        availabilityStatus:
+          payload.operationalStatus === "blocked"
+            ? "offline"
+            : currentProfile.availabilityStatus ?? "offline",
+        reviewNotes: nextReviewNotes,
+        reviewedAt: new Date().toISOString(),
+        reviewedBy: session.user.id
+      });
+      driverProfilesById.set(persistedProfile.id, persistedProfile);
+      publishDirectoryRealtime(
+        "driver_operational_status_updated",
+        { userIds: [persistedProfile.id] },
+        { driverProfile: persistedProfile }
+      );
+      return persistedProfile;
+    }
+  );
+
+  app.post<{ Body: InternalUserCreatePayload }>("/ops/internal-users", async (request, reply) => {
+    const session = requireAdminSession(
+      requireSessionOrThrow(await requireOpsSession(request.headers.authorization))
+    );
+
+    const parsedPayload = internalUserCreateSchema.safeParse(request.body);
+    if (!parsedPayload.success) {
+      apiError(400, "invalid_internal_user_payload");
+    }
+
+    const payload = parsedPayload.data as InternalUserCreatePayload;
+    const authSession = await createInternalUserAccount(payload);
+    const persistedProfile = await saveInternalUserProfile({
+      id: authSession.user.id,
+      role: authSession.user.role as InternalUserProfile["role"],
+      fullName: authSession.user.fullName,
+      phone: authSession.user.phone,
+      email: authSession.user.email,
+      city: "Lima",
+      isActive: true,
+      createdAt: new Date().toISOString()
+    });
+    internalUserProfilesById.set(persistedProfile.id, persistedProfile);
+    publishDirectoryRealtime(
+      "internal_user_created",
+      { userIds: [persistedProfile.id] },
+      { internalUserProfile: persistedProfile }
+    );
+    await appendBusinessAuditEntry(
+      appendBusinessAudit(
+        session,
+        "promotion_created",
+        `Usuario interno ${persistedProfile.email} creado con rol ${persistedProfile.role}`
+      )
+    );
+
+    return created(reply, persistedProfile);
+  });
+
+  app.post<{ Params: { internalUserId: string }; Body: InternalUserStatusUpdate }>(
+    "/ops/internal-users/:internalUserId/status",
+    async (request) => {
+      requireAdminSession(
+        requireSessionOrThrow(await requireOpsSession(request.headers.authorization))
+      );
+
+      const parsedPayload = internalUserStatusSchema.safeParse(request.body);
+      if (!parsedPayload.success) {
+        apiError(400, "invalid_status_payload");
+      }
+
+      const payload = parsedPayload.data as InternalUserStatusUpdate;
+      const profile = internalUserProfilesById.get(request.params.internalUserId);
+
+      if (!profile) {
+        apiError(404, "internal_user_not_found");
+      }
+
+      const persistedProfile = await saveInternalUserProfile({
+        ...(profile as InternalUserProfile),
+        isActive: payload.isActive
+      });
+      internalUserProfilesById.set(persistedProfile.id, persistedProfile);
+      await updateInternalUserAuthStatus(persistedProfile.id, payload.isActive);
+      publishDirectoryRealtime(
+        "internal_user_status_updated",
+        { userIds: [persistedProfile.id] },
+        { internalUserProfile: persistedProfile }
+      );
+
       return persistedProfile;
     }
   );

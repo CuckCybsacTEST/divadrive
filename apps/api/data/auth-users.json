@@ -1,0 +1,22 @@
+[
+  {
+    "id": "admin-dev-0001",
+    "email": "admin@divadrive.local",
+    "password": "123456789",
+    "role": "admin",
+    "fullName": "Admin",
+    "phone": "999999999",
+    "createdAt": "2026-03-12T00:00:00.000Z",
+    "isActive": true
+  },
+  {
+    "id": "operator-dev-4ad2105f-6a0a-48e9-9e1a-832f41b5017b",
+    "email": "operator.test@divadrive.local",
+    "password": "123456789",
+    "role": "operator",
+    "fullName": "Operador Test",
+    "phone": "999555444",
+    "isActive": false,
+    "createdAt": "2026-03-12T18:31:49.728Z"
+  }
+]

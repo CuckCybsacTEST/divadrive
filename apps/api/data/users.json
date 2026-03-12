@@ -9,7 +9,9 @@
       "documentsSubmitted": true,
       "licenseNumber": "LIC-1222",
       "vehicleDescription": "Sedan blanco - onboarding inicial",
-      "createdAt": "2026-03-10T19:34:00.658Z"
+      "createdAt": "2026-03-10T19:34:00.658Z",
+      "operationalStatus": "active",
+      "availabilityStatus": "offline"
     }
   ],
   "passengers": [
@@ -19,6 +21,28 @@
       "phone": "999111222",
       "city": "Lima",
       "createdAt": "2026-03-10T18:25:12.294Z"
+    }
+  ],
+  "internalUsers": [
+    {
+      "id": "admin-dev-0001",
+      "role": "admin",
+      "fullName": "Admin",
+      "phone": "999999999",
+      "email": "admin@divadrive.local",
+      "city": "Lima",
+      "isActive": true,
+      "createdAt": "2026-03-12T18:13:19.234Z"
+    },
+    {
+      "id": "operator-dev-4ad2105f-6a0a-48e9-9e1a-832f41b5017b",
+      "role": "operator",
+      "fullName": "Operador Test",
+      "phone": "999555444",
+      "email": "operator.test@divadrive.local",
+      "city": "Lima",
+      "isActive": false,
+      "createdAt": "2026-03-12T18:31:49.733Z"
     }
   ]
 }

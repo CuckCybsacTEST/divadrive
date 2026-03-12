@@ -7,6 +7,10 @@ import {
   SERVICE_NAME,
   type AuthSession,
   type DriverApprovalStatus,
+  type DriverOperationalStatus,
+  type InternalUserCreatePayload,
+  type InternalUserProfile,
+  type InternalUserStatusUpdate,
   type IncidentStatus,
   type OperationalZone,
   type OpsDashboardSnapshot,
@@ -26,6 +30,7 @@ type RealtimePayload = RealtimeEnvelope & {
   trip?: RideTrip;
   timelineEvent?: TripTimelineEvent;
   driverProfile?: AdminDirectorySnapshot["drivers"][number];
+  internalUserProfile?: InternalUserProfile;
   passengerProfile?: AdminDirectorySnapshot["passengers"][number];
   pricing?: PricingConfig;
   promotion?: BusinessRulesSnapshot["promotions"][number];
@@ -284,6 +289,33 @@ const persistSession = (session: AuthSession | null) => {
   window.localStorage.setItem(STORAGE_KEY, JSON.stringify(session));
 };
 
+const isStoredSessionValid = (value: unknown): value is AuthSession => {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const candidate = value as Partial<AuthSession> & {
+    user?: {
+      id?: unknown;
+      role?: unknown;
+      fullName?: unknown;
+      email?: unknown;
+    };
+  };
+
+  return (
+    typeof candidate.accessToken === "string" &&
+    candidate.accessToken.length > 0 &&
+    typeof candidate.refreshToken === "string" &&
+    candidate.refreshToken.length > 0 &&
+    candidate.user !== undefined &&
+    typeof candidate.user.id === "string" &&
+    typeof candidate.user.role === "string" &&
+    typeof candidate.user.fullName === "string" &&
+    typeof candidate.user.email === "string"
+  );
+};
+
 const parseStoredSession = () => {
   const savedSession = window.localStorage.getItem(STORAGE_KEY);
 
@@ -292,7 +324,14 @@ const parseStoredSession = () => {
   }
 
   try {
-    return JSON.parse(savedSession) as AuthSession;
+    const parsedSession = JSON.parse(savedSession) as unknown;
+
+    if (!isStoredSessionValid(parsedSession)) {
+      window.localStorage.removeItem(STORAGE_KEY);
+      return null;
+    }
+
+    return parsedSession;
   } catch {
     window.localStorage.removeItem(STORAGE_KEY);
     return null;
@@ -310,7 +349,8 @@ export default function App() {
   const [snapshot, setSnapshot] = useState<OpsDashboardSnapshot>(emptySnapshot);
   const [directory, setDirectory] = useState<AdminDirectorySnapshot>({
     drivers: [],
-    passengers: []
+    passengers: [],
+    internalUsers: []
   });
   const [business, setBusiness] = useState<BusinessRulesSnapshot>(emptyBusiness);
   const [commercialMetrics, setCommercialMetrics] =
@@ -333,6 +373,14 @@ export default function App() {
     description: "",
     isActive: true
   });
+  const [internalUserDraft, setInternalUserDraft] = useState<InternalUserCreatePayload>({
+    email: "operator@divadrive.local",
+    password: "123456789",
+    fullName: "Operador DIVA",
+    phone: "999888777",
+    role: "operator"
+  });
+  const [driverReviewDrafts, setDriverReviewDrafts] = useState<Record<string, string>>({});
   const operationalAlerts = buildOperationalAlerts(commercialMetrics);
   const operationalRecommendations = buildOperationalRecommendations(commercialMetrics);
   const filteredQueueTrips = snapshot.queueTrips.filter(
@@ -610,15 +658,27 @@ export default function App() {
             scheduleResourceRefresh("snapshot", session, () => loadSnapshot(session));
             break;
           case "ops.directory.refresh":
-            if (payload.driverProfile || payload.passengerProfile) {
-              setDirectory((current) => ({
-                drivers: payload.driverProfile
-                  ? [...current.drivers.filter((item) => item.id !== payload.driverProfile!.id), payload.driverProfile]
+              if (
+                payload.driverProfile ||
+                payload.internalUserProfile ||
+                payload.passengerProfile
+              ) {
+                setDirectory((current) => ({
+                  drivers: payload.driverProfile
+                    ? [...current.drivers.filter((item) => item.id !== payload.driverProfile!.id), payload.driverProfile]
                       .sort((a, b) => b.createdAt.localeCompare(a.createdAt))
-                  : current.drivers,
-                passengers: payload.passengerProfile
-                  ? [
-                      ...current.passengers.filter(
+                    : current.drivers,
+                  internalUsers: payload.internalUserProfile
+                    ? [
+                        ...current.internalUsers.filter(
+                          (item) => item.id !== payload.internalUserProfile!.id
+                        ),
+                        payload.internalUserProfile
+                      ].sort((a, b) => b.createdAt.localeCompare(a.createdAt))
+                    : current.internalUsers,
+                  passengers: payload.passengerProfile
+                    ? [
+                        ...current.passengers.filter(
                         (item) => item.id !== payload.passengerProfile!.id
                       ),
                       payload.passengerProfile
@@ -736,7 +796,8 @@ export default function App() {
         body: JSON.stringify(body)
       }).then(async (response) => {
         if (!response.ok) {
-          throw new Error("auth_failed");
+          const payload = (await response.json().catch(() => null)) as { error?: string } | null;
+          throw new Error(payload?.error ?? "auth_failed");
         }
 
         return (await response.json()) as AuthSession;
@@ -744,11 +805,13 @@ export default function App() {
 
       updateSession(nextSession);
       setError(null);
-    } catch {
+    } catch (error) {
       setError(
-        authMode === "sign_in"
-          ? "No pudimos iniciar sesion con esas credenciales."
-          : "No pudimos crear la cuenta administrativa."
+        error instanceof Error && error.message === "account_inactive"
+          ? "La cuenta interna esta inactiva. Necesitas que un admin la reactive."
+          : authMode === "sign_in"
+            ? "No pudimos iniciar sesion con esas credenciales."
+            : "No pudimos crear la cuenta administrativa."
       );
       setLoading(false);
     }
@@ -757,10 +820,11 @@ export default function App() {
   const handleSignOut = () => {
     updateSession(null);
     setSnapshot(emptySnapshot);
-    setDirectory({
-      drivers: [],
-      passengers: []
-    });
+      setDirectory({
+        drivers: [],
+        passengers: [],
+        internalUsers: []
+      });
     setBusiness(emptyBusiness);
     setCommercialMetrics(emptyCommercialMetrics);
     setEventStream(emptyEventStream);
@@ -798,6 +862,71 @@ export default function App() {
       setDirectory(nextDirectory);
     } catch {
       setError("No pudimos actualizar la aprobacion de la conductora.");
+    }
+  };
+
+  const handleDriverOperationalStatus = async (
+    driverId: string,
+    operationalStatus: DriverOperationalStatus
+  ) => {
+    try {
+      await authorizedFetch(`/ops/drivers/${driverId}/operations`, {
+        method: "POST",
+        body: JSON.stringify({
+          operationalStatus,
+          reviewNotes: driverReviewDrafts[driverId]?.trim() || undefined
+        })
+      });
+
+      const nextDirectory = await authorizedFetch<AdminDirectorySnapshot>("/ops/directory");
+      setDirectory(nextDirectory);
+      setDriverReviewDrafts((current) => ({
+        ...current,
+        [driverId]: ""
+      }));
+      setError(null);
+    } catch {
+      setError("No pudimos actualizar el estado operativo de la conductora.");
+    }
+  };
+
+  const handleCreateInternalUser = async () => {
+    try {
+      await authorizedFetch<InternalUserProfile>("/ops/internal-users", {
+        method: "POST",
+        body: JSON.stringify(internalUserDraft)
+      });
+
+      const nextDirectory = await authorizedFetch<AdminDirectorySnapshot>("/ops/directory");
+      setDirectory(nextDirectory);
+      setInternalUserDraft({
+        email: "",
+        password: "123456789",
+        fullName: "",
+        phone: "",
+        role: "operator"
+      });
+      setError(null);
+    } catch {
+      setError("No pudimos crear el usuario interno.");
+    }
+  };
+
+  const handleInternalUserStatus = async (
+    internalUserId: string,
+    isActive: InternalUserStatusUpdate["isActive"]
+  ) => {
+    try {
+      await authorizedFetch<InternalUserProfile>(`/ops/internal-users/${internalUserId}/status`, {
+        method: "POST",
+        body: JSON.stringify({ isActive })
+      });
+
+      const nextDirectory = await authorizedFetch<AdminDirectorySnapshot>("/ops/directory");
+      setDirectory(nextDirectory);
+      setError(null);
+    } catch {
+      setError("No pudimos actualizar el acceso del usuario interno.");
     }
   };
 
@@ -1192,8 +1321,33 @@ export default function App() {
                 <p className="meta">
                   Disponibilidad: {driver.availabilityStatus ?? "offline"}
                 </p>
+                <p className="meta">
+                  Estado operativo: {driver.operationalStatus}
+                </p>
+                <p className="meta">
+                  Revision: {driver.reviewedAt
+                    ? new Date(driver.reviewedAt).toLocaleString()
+                    : "sin revision"}
+                </p>
+                <label className="fullWidth">
+                  <span>Nota operativa</span>
+                  <input
+                    className="authInput"
+                    value={driverReviewDrafts[driver.id] ?? driver.reviewNotes ?? ""}
+                    onChange={(event) =>
+                      setDriverReviewDrafts((current) => ({
+                        ...current,
+                        [driver.id]: event.target.value
+                      }))
+                    }
+                    placeholder="Motivo de aprobacion, bloqueo o seguimiento"
+                  />
+                </label>
+                {driver.reviewNotes ? (
+                  <p className="meta">Ultima nota: {driver.reviewNotes}</p>
+                ) : null}
                 <div className="incidentActions">
-                  {(["approved", "rejected"] as const).map((status) => (
+                  {(["pending", "approved", "rejected"] as const).map((status) => (
                     <button
                       key={status}
                       className="secondaryAction"
@@ -1202,6 +1356,17 @@ export default function App() {
                       {status}
                     </button>
                   ))}
+                  <button
+                    className="secondaryAction"
+                    onClick={() =>
+                      handleDriverOperationalStatus(
+                        driver.id,
+                        driver.operationalStatus === "blocked" ? "active" : "blocked"
+                      )
+                    }
+                  >
+                    {driver.operationalStatus === "blocked" ? "Reactivar" : "Bloquear"}
+                  </button>
                 </div>
               </section>
             ))
@@ -1220,6 +1385,118 @@ export default function App() {
                 </div>
                 <p className="meta">{passenger.phone}</p>
                 <p className="meta">Ciudad: {passenger.city}</p>
+              </section>
+            ))
+          )}
+        </Panel>
+
+        <Panel title="Usuarios internos" count={directory.internalUsers.length}>
+          {session.user.role === "admin" ? (
+            <>
+              <section className="formGrid">
+                <label>
+                  <span>Nombre</span>
+                  <input
+                    className="authInput"
+                    value={internalUserDraft.fullName}
+                    onChange={(event) =>
+                      setInternalUserDraft((current) => ({
+                        ...current,
+                        fullName: event.target.value
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Email</span>
+                  <input
+                    className="authInput"
+                    type="email"
+                    value={internalUserDraft.email}
+                    onChange={(event) =>
+                      setInternalUserDraft((current) => ({
+                        ...current,
+                        email: event.target.value
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Telefono</span>
+                  <input
+                    className="authInput"
+                    value={internalUserDraft.phone}
+                    onChange={(event) =>
+                      setInternalUserDraft((current) => ({
+                        ...current,
+                        phone: event.target.value
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Password</span>
+                  <input
+                    className="authInput"
+                    type="password"
+                    value={internalUserDraft.password}
+                    onChange={(event) =>
+                      setInternalUserDraft((current) => ({
+                        ...current,
+                        password: event.target.value
+                      }))
+                    }
+                  />
+                </label>
+                <label>
+                  <span>Rol</span>
+                  <select
+                    className="authInput"
+                    value={internalUserDraft.role}
+                    onChange={(event) =>
+                      setInternalUserDraft((current) => ({
+                        ...current,
+                        role: event.target.value as InternalUserCreatePayload["role"]
+                      }))
+                    }
+                  >
+                    <option value="operator">Operator</option>
+                    <option value="admin">Admin</option>
+                  </select>
+                </label>
+              </section>
+              <button className="primaryAction" onClick={handleCreateInternalUser}>
+                Crear usuario interno
+              </button>
+            </>
+          ) : null}
+          {directory.internalUsers.length === 0 ? (
+            <p className="empty">No hay operadores o administradores registrados.</p>
+          ) : (
+            directory.internalUsers.map((internalUser) => (
+              <section key={internalUser.id} className="tripCard done">
+                <div className="tripRow">
+                  <strong>{internalUser.fullName}</strong>
+                  <span className="badge">{internalUser.role}</span>
+                </div>
+                <p className="meta">{internalUser.email}</p>
+                <p className="meta">{internalUser.phone}</p>
+                <p className="meta">Ciudad: {internalUser.city}</p>
+                <p className="meta">
+                  Estado: {internalUser.isActive ? "activo" : "inactivo"}
+                </p>
+                {session.user.role === "admin" && session.user.id !== internalUser.id ? (
+                  <div className="incidentActions">
+                    <button
+                      className="secondaryAction"
+                      onClick={() =>
+                        handleInternalUserStatus(internalUser.id, !internalUser.isActive)
+                      }
+                    >
+                      {internalUser.isActive ? "Desactivar acceso" : "Activar acceso"}
+                    </button>
+                  </div>
+                ) : null}
               </section>
             ))
           )}

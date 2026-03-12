@@ -9,6 +9,9 @@ import type {
   DriverProfile,
   DriverTripStatusUpdate,
   HomeBootstrap,
+  InternalUserCreatePayload,
+  InternalUserProfile,
+  InternalUserStatusUpdate,
   OperationalZone,
   OpsDashboardSnapshot,
   PassengerProfile,
@@ -38,6 +41,11 @@ export interface AuthRoutesContext {
     password: string;
     role?: Role;
   }) => Promise<AuthSession>;
+  signInLocally: (payload: {
+    email: string;
+    password: string;
+    role?: Role;
+  }) => Promise<AuthSession>;
   signUpWithSupabase: (payload: {
     email: string;
     password: string;
@@ -45,14 +53,27 @@ export interface AuthRoutesContext {
     phone: string;
     role: Role;
   }) => Promise<AuthSession>;
+  signUpLocally: (payload: {
+    email: string;
+    password: string;
+    fullName: string;
+    phone: string;
+    role: Role;
+  }) => Promise<AuthSession>;
   refreshSupabaseSession: (refreshToken: string) => Promise<AuthSession>;
+  refreshLocalSession: (refreshToken: string) => Promise<AuthSession | null>;
   isSupabaseReady: boolean;
   getDriverProfile: (driverId: string) => Promise<DriverProfile | null>;
+  getInternalUserProfile: (internalUserId: string) => Promise<InternalUserProfile | null>;
   getPassengerProfile: (passengerId: string) => Promise<PassengerProfile | null>;
   publishDirectoryRealtime: (
     reason: string,
     targets?: { userIds?: string[] },
-    payload?: { driverProfile?: DriverProfile; passengerProfile?: PassengerProfile }
+    payload?: {
+      driverProfile?: DriverProfile;
+      internalUserProfile?: InternalUserProfile;
+      passengerProfile?: PassengerProfile;
+    }
   ) => void;
 }
 
@@ -71,7 +92,10 @@ export interface OpsRoutesContext {
   getCommercialMetrics: () => Promise<unknown>;
   getOpsEventStream: () => Promise<TripTimelineEvent[]>;
   listDriverProfiles: () => Promise<DriverProfile[]>;
+  listInternalUserProfiles: () => Promise<InternalUserProfile[]>;
   listPassengerProfiles: () => Promise<PassengerProfile[]>;
+  createInternalUserAccount: (payload: InternalUserCreatePayload) => Promise<AuthSession>;
+  getInternalUserProfile: (internalUserId: string) => Promise<InternalUserProfile | null>;
   hydrateDirectoryState: (snapshot: AdminDirectorySnapshot) => AdminDirectorySnapshot;
   readTrips: () => Promise<RideTrip[]>;
   hydrateTrip: (trip: RideTrip) => RideTrip;
@@ -84,13 +108,26 @@ export interface OpsRoutesContext {
   saveIncident: (incident: TripIncident) => Promise<TripIncident>;
   publishTripRealtime: (trip: RideTrip, reason: string) => void;
   driverApprovalSchema: ZodTypeAny;
+  driverOperationalSchema: ZodTypeAny;
   driverAvailabilitySchema: ZodTypeAny;
+  internalUserCreateSchema: ZodTypeAny;
+  internalUserStatusSchema: ZodTypeAny;
   driverProfilesById: Map<string, DriverProfile>;
+  internalUserProfilesById: Map<string, InternalUserProfile>;
   saveDriverProfile: (profile: DriverProfile) => Promise<DriverProfile>;
+  saveInternalUserProfile: (profile: InternalUserProfile) => Promise<InternalUserProfile>;
+  updateInternalUserAuthStatus: (
+    internalUserId: string,
+    isActive: boolean
+  ) => Promise<void>;
   publishDirectoryRealtime: (
     reason: string,
     targets?: { userIds?: string[] },
-    payload?: { driverProfile?: DriverProfile; passengerProfile?: PassengerProfile }
+    payload?: {
+      driverProfile?: DriverProfile;
+      internalUserProfile?: InternalUserProfile;
+      passengerProfile?: PassengerProfile;
+    }
   ) => void;
   pricingConfigSchema: ZodTypeAny;
   savePricingConfig: (config: PricingConfig) => Promise<PricingConfig>;
@@ -212,7 +249,11 @@ export interface DriverRoutesContext {
   publishDirectoryRealtime: (
     reason: string,
     targets?: { userIds?: string[] },
-    payload?: { driverProfile?: DriverProfile; passengerProfile?: PassengerProfile }
+    payload?: {
+      driverProfile?: DriverProfile;
+      internalUserProfile?: InternalUserProfile;
+      passengerProfile?: PassengerProfile;
+    }
   ) => void;
   driverStatusSchema: ZodTypeAny;
   driverStatusFlow: DriverTripStatusUpdate["status"][];

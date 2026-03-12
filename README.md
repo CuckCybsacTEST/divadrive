@@ -8,6 +8,7 @@ El repositorio ya supero la base documental inicial y hoy se encuentra en un **M
 Actualmente existe un flujo funcional end-to-end para:
 
 - autenticacion con Supabase Auth desde el API
+- autenticacion local de desarrollo con fallback estable cuando Supabase no esta disponible
 - solicitud de viaje por pasajero
 - aceptacion y avance manual del viaje por conductora
 - tracking basico, historial, timeline e incidencias
@@ -47,7 +48,9 @@ Todavia no debe considerarse listo para produccion real. La prioridad actual es 
 - panel web con login por `operator` o `admin` y endpoints `ops` protegidos
 - cambio de estado de incidencias desde panel autenticado
 - onboarding documental basico de conductoras con aprobacion administrativa
-- directorio administrativo de conductoras y pasajeros en panel
+- directorio administrativo de conductoras, pasajeros y usuarios internos en panel
+- gestion administrativa de usuarios internos con alta y activacion/desactivacion de acceso
+- bloqueo/reactivacion operativa de conductoras con nota de revision y trazabilidad
 - pricing configurable, promociones administrables y auditoria comercial
 - historial de viajes, metricas comerciales, eventos operativos y notificaciones
 - buscador de destinos, ruta simulada en mapa y ETA mas creible
@@ -58,6 +61,7 @@ Todavia no debe considerarse listo para produccion real. La prioridad actual es 
 - pasajero con mapa, origen/destino, estimacion, solicitud, historial e incidencias
 - conductora con onboarding basico, cola de solicitudes, aceptacion y avance manual del viaje
 - empresa con panel de viajes, incidencias, directorio, pricing, promociones y auditoria comercial
+- identidad y acceso unificados para `passenger`, `driver`, `operator` y `admin`
 - contratos compartidos de dominio para estados, eventos, sesiones y reglas comerciales
 - base realtime sobre WebSocket propio y bridge con Supabase Realtime
 
@@ -70,13 +74,13 @@ Todavia no debe considerarse listo para produccion real. La prioridad actual es 
 Operativamente, la plataforma ya puede sostener un ciclo principal de servicio bajo supervision interna:
 
 - pasajero autenticado puede estimar, solicitar, cancelar y seguir un viaje
-- conductora aprobada puede ponerse `online`, recibir cola elegible, aceptar y avanzar estados
+- conductora aprobada y activa puede ponerse `online`, recibir cola elegible, aceptar y avanzar estados
 - solicitudes no tomadas expiran automaticamente
 - la cola de conductora se prioriza por proximidad segun ultima ubicacion conocida
 - existe una ventana corta de reserva para evitar que dos conductoras compitan por la misma solicitud al mismo tiempo
 - las solicitudes y la elegibilidad de conductoras ya respetan zonas operativas configurables
 - la conductora ya ve ingresos basicos derivados de viajes completados y payout configurable
-- operaciones puede intervenir sobre conductoras, incidencias, pricing, promociones y monitoreo
+- operaciones puede intervenir sobre conductoras, incidencias, pricing, promociones, usuarios internos y monitoreo
 
 No esta lista todavia para una operacion comercial real en calle. Lo pendiente ya no es el flujo basico, sino endurecimiento operativo, asignacion mas fuerte, persistencia mas consistente y expansion de capacidades empresariales.
 

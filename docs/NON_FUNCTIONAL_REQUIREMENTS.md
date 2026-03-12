@@ -32,6 +32,7 @@ Definir criterios minimos no funcionales para evitar una base tecnica ambigua.
 - pruebas automatizadas progresivas
 - entornos separados al menos para desarrollo y produccion
 - pipeline de integracion continua antes de salida productiva
+- contratos compartidos alineados entre `domain`, `api`, `web` y `mobile` mediante typecheck de workspace
 
 ## Privacidad
 - retencion de datos definida por politica

@@ -83,6 +83,7 @@ export const createTripService = ({
     if (
       !driverProfile ||
       driverProfile.approvalStatus !== "approved" ||
+      driverProfile.operationalStatus !== "active" ||
       driverProfile.availabilityStatus !== "online"
     ) {
       return false;

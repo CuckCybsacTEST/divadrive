@@ -29,6 +29,7 @@ export const syncLocalDataToSupabase = async () => {
   const [
     hasPassengers,
     hasDrivers,
+    hasInternalUsers,
     hasTrips,
     hasIncidents,
     hasEvents,
@@ -38,6 +39,7 @@ export const syncLocalDataToSupabase = async () => {
   ] = await Promise.all([
     tableHasRows("passenger_profiles"),
     tableHasRows("driver_profiles"),
+    tableHasRows("internal_user_profiles"),
     tableHasRows("trips"),
     tableHasRows("trip_incidents"),
     tableHasRows("trip_events"),
@@ -46,9 +48,13 @@ export const syncLocalDataToSupabase = async () => {
     tableHasRows("business_audit_log")
   ]);
 
-  if (!hasPassengers || !hasDrivers) {
+  if (!hasPassengers || !hasDrivers || !hasInternalUsers) {
     const localUsers = await readLocalUsers();
-    if (localUsers.drivers.length > 0 || localUsers.passengers.length > 0) {
+    if (
+      localUsers.drivers.length > 0 ||
+      localUsers.passengers.length > 0 ||
+      localUsers.internalUsers.length > 0
+    ) {
       await writeUsers(localUsers);
     }
   }

@@ -10,6 +10,7 @@ import {
   DEFAULT_HOME_BOOTSTRAP,
   type DriverProfile,
   DRIVER_STATUS_FLOW,
+  type InternalUserProfile,
   type OperationalZone,
   type PassengerProfile,
   type PricingConfig,
@@ -34,6 +35,7 @@ import {
   savePricingConfig,
   savePromotion
 } from "./business-store.js";
+import { setLocalAuthUserStatus, signInLocalUser, signUpLocalUser } from "./dev-auth-store.js";
 import { appEnv } from "./env.js";
 import { isApiError } from "./errors.js";
 import { registerRequestObservability } from "./observability.js";
@@ -59,6 +61,7 @@ import { createBusinessService } from "./services/business-service.js";
 import { createOpsService } from "./services/ops-service.js";
 import { createRealtimeService } from "./services/realtime-service.js";
 import { createTripService } from "./services/trip-service.js";
+import { readSession, readSessionByRefreshToken, writeSession } from "./session-store.js";
 import { syncLocalDataToSupabase } from "./supabase-bootstrap.js";
 import {
   getTrip,
@@ -70,11 +73,14 @@ import {
 } from "./trip-store.js";
 import {
   getDriverProfile,
+  getInternalUserProfile,
   getPassengerProfile,
   listDriverProfiles,
+  listInternalUserProfiles,
   listPassengerProfiles,
   readUsers,
   saveDriverProfile,
+  saveInternalUserProfile,
   savePassengerProfile
 } from "./user-store.js";
 
@@ -106,6 +112,7 @@ const tripsById = new Map<string, RideTrip>();
 const incidentsById = new Map<string, TripIncident>();
 const tripEventsById = new Map<string, TripTimelineEvent>();
 const driverProfilesById = new Map<string, DriverProfile>();
+const internalUserProfilesById = new Map<string, InternalUserProfile>();
 const passengerProfilesById = new Map<string, PassengerProfile>();
 let pricingConfig: PricingConfig = DEFAULT_PRICING_CONFIG;
 let operationalZones: OperationalZone[] = DEFAULT_OPERATIONAL_ZONES;
@@ -134,12 +141,16 @@ const businessRepository = createBusinessRepository({
 
 const directoryRepository = createDirectoryRepository({
   driverProfilesById,
+  internalUserProfilesById,
   passengerProfilesById,
   getDriverProfile,
+  getInternalUserProfile,
   getPassengerProfile,
   listDriverProfiles,
+  listInternalUserProfiles,
   listPassengerProfiles,
   saveDriverProfile,
+  saveInternalUserProfile,
   savePassengerProfile
 });
 
@@ -173,10 +184,13 @@ const {
   supabaseAdmin,
   supabaseAuth,
   getDriverProfile: directoryRepository.getDriverProfileById,
+  getInternalUserProfile: directoryRepository.getInternalUserProfileById,
   getPassengerProfile: directoryRepository.getPassengerProfileById,
   saveDriverProfile: directoryRepository.saveDriverProfile,
+  saveInternalUserProfile: directoryRepository.saveInternalUserProfile,
   savePassengerProfile: directoryRepository.savePassengerProfile,
   driverProfilesById,
+  internalUserProfilesById,
   passengerProfilesById,
   defaultCity: DEFAULT_HOME_BOOTSTRAP.city,
   userRoles: USER_ROLES
@@ -251,6 +265,22 @@ const incidentStatusSchema = z.object({
 const driverApprovalSchema = z.object({
   approvalStatus: z.enum(["pending", "approved", "rejected"])
 });
+const driverOperationalSchema = z.object({
+  operationalStatus: z.enum(["active", "blocked"]),
+  reviewNotes: z.string().max(280).optional()
+});
+
+const internalUserCreateSchema = z.object({
+  email: z.string().email(),
+  password: z.string().min(8),
+  fullName: z.string().min(3),
+  phone: z.string().min(6),
+  role: z.enum(["operator", "admin"])
+});
+
+const internalUserStatusSchema = z.object({
+  isActive: z.boolean()
+});
 const driverAvailabilitySchema = z.object({
   availabilityStatus: z.enum(["offline", "online"]),
   currentLocation: ridePointSchema.pick({
@@ -308,12 +338,36 @@ const requireSession = async (authorizationHeader?: string) => {
       return null;
     }
 
-    return toAuthSession(data.user, {
+    const session = toAuthSession(data.user, {
       accessToken: token
     });
+
+    if (session.user.role === "operator" || session.user.role === "admin") {
+      const internalUserProfile = await getInternalUserProfile(session.user.id);
+
+      if (internalUserProfile && !internalUserProfile.isActive) {
+        return null;
+      }
+    }
+
+    return session;
   }
 
-  return null;
+  const session = await readSession(token);
+
+  if (!session) {
+    return null;
+  }
+
+  if (session.user.role === "operator" || session.user.role === "admin") {
+    const internalUserProfile = await getInternalUserProfile(session.user.id);
+
+    if (internalUserProfile && !internalUserProfile.isActive) {
+      return null;
+    }
+  }
+
+  return session;
 };
 
 const realtimeHub = createRealtimeHub(async (token) => requireSession(`Bearer ${token}`));
@@ -359,6 +413,9 @@ const hydrateDriverProfile = (profile: DriverProfile) => directoryRepository.cac
 
 const hydratePassengerProfile = (profile: PassengerProfile) =>
   directoryRepository.cachePassengerProfile(profile);
+
+const hydrateInternalUserProfile = (profile: InternalUserProfile) =>
+  directoryRepository.cacheInternalUserProfile(profile);
 
 const hydratePromotion = (promotion: Promotion) => businessRepository.cachePromotion(promotion);
 
@@ -419,6 +476,8 @@ const {
   hydrateEvent,
   getDriverProfile,
   hydrateDriverProfile,
+  getInternalUserProfile: directoryRepository.getInternalUserProfileById,
+  hydrateInternalUserProfile,
   getPassengerProfile,
   hydratePassengerProfile,
   getPricingConfig,
@@ -522,6 +581,7 @@ registerOpsRoutes({
   getCommercialMetrics,
   getOpsEventStream,
   listDriverProfiles: directoryRepository.listDriverProfiles,
+  listInternalUserProfiles: directoryRepository.listInternalUserProfiles,
   listPassengerProfiles: directoryRepository.listPassengerProfiles,
   hydrateDirectoryState,
   readTrips: tripRepository.listTrips,
@@ -535,9 +595,29 @@ registerOpsRoutes({
   saveIncident: tripRepository.saveIncident,
   publishTripRealtime,
   driverApprovalSchema,
+  driverOperationalSchema,
   driverAvailabilitySchema,
+  internalUserCreateSchema,
+  internalUserStatusSchema,
   driverProfilesById,
+  internalUserProfilesById,
   saveDriverProfile: directoryRepository.saveDriverProfile,
+  saveInternalUserProfile: directoryRepository.saveInternalUserProfile,
+  createInternalUserAccount: async (payload) => {
+    if (isSupabaseReady) {
+      return signUpWithSupabase(payload);
+    }
+
+    const session = await signUpLocalUser(payload);
+    await writeSession(session);
+    return session;
+  },
+  getInternalUserProfile: directoryRepository.getInternalUserProfileById,
+  updateInternalUserAuthStatus: async (internalUserId, isActive) => {
+    if (!isSupabaseReady) {
+      await setLocalAuthUserStatus(internalUserId, isActive);
+    }
+  },
   publishDirectoryRealtime,
   pricingConfigSchema,
   savePricingConfig: businessRepository.savePricingConfig,
@@ -564,10 +644,31 @@ registerAuthRoutes({
   requireSession,
   ensureProfileForSession,
   signInWithSupabase,
+  signInLocally: async (payload) => {
+    const session = await signInLocalUser(payload);
+    await writeSession(session);
+    return session;
+  },
   signUpWithSupabase,
+  signUpLocally: async (payload) => {
+    const session = await signUpLocalUser(payload);
+    await writeSession(session);
+    return session;
+  },
   refreshSupabaseSession,
+  refreshLocalSession: async (refreshToken) => {
+    const session = await readSessionByRefreshToken(refreshToken);
+
+    if (!session) {
+      return null;
+    }
+
+    await writeSession(session);
+    return session;
+  },
   isSupabaseReady,
   getDriverProfile: directoryRepository.getDriverProfileById,
+  getInternalUserProfile: directoryRepository.getInternalUserProfileById,
   getPassengerProfile: directoryRepository.getPassengerProfileById,
   publishDirectoryRealtime
 });
@@ -655,6 +756,7 @@ export const bootstrapApp = async () => {
   incidentsById.clear();
   tripEventsById.clear();
   driverProfilesById.clear();
+  internalUserProfilesById.clear();
   passengerProfilesById.clear();
   promotionsById.clear();
   businessAuditLog.length = 0;

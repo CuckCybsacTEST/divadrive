@@ -36,6 +36,10 @@ Este proyecto ya tiene preparada la base para empezar a usar Supabase desde el A
   - `driver`
   - `operator`
   - `admin`
+- Los perfiles de negocio quedan separados por tipo:
+  - `passenger_profiles`
+  - `driver_profiles` con aprobacion, estado operativo y notas de revision
+  - `internal_user_profiles` para `operator/admin`
 - El SQL usa ese `role` para RLS mediante `current_app_role()` e `is_ops_role()`
 - `service_role` sigue viviendo solo en el API y bypassa RLS para la capa de negocio
 
@@ -48,6 +52,7 @@ Este proyecto ya tiene preparada la base para empezar a usar Supabase desde el A
 ## Paso 7. Validar Realtime externo
 - Asegurate de re-ejecutar [D:\DIVADRIVE\docs\sql\supabase_init.sql](D:/DIVADRIVE/docs/sql/supabase_init.sql) despues de esta fase
 - Ese SQL ahora agrega `passenger_profiles`, `driver_profiles`, `trips`, `trip_incidents`, `trip_events`, `business_config`, `promotions` y `business_audit_log` a la publicacion `supabase_realtime`
+- Tambien agrega `internal_user_profiles` para que el panel vea altas/cambios de operadores y admins
 - Sin eso, el API puede emitir WebSocket por cambios propios, pero no podra reemitir cambios hechos directo en Supabase
 - Despues de correrlo, prueba un `update` externo sobre `promotions` o `trips` y confirma que `web/mobile` reaccionen sin polling
 

@@ -7,6 +7,8 @@ Definir politicas operativas minimas que impactan el producto y la implementacio
 - toda conductora debe pasar validacion documental antes de operar
 - el estado de habilitacion debe ser visible para empresa y backend
 - una conductora no habilitada no puede quedar online ni recibir viajes
+- una conductora bloqueada operativamente debe quedar fuera de cola y forzada a `offline`
+- toda accion de aprobacion, rechazo, bloqueo o reactivacion debe poder dejar nota operativa
 
 ## Zonas operativas
 - la empresa define zonas habilitadas
@@ -31,11 +33,13 @@ Definir politicas operativas minimas que impactan el producto y la implementacio
 
 ## Estado operativo actual
 - una conductora no aprobada no puede ponerse `online`
+- una conductora bloqueada no puede ponerse `online`, aceptar viajes ni permanecer disponible
 - una conductora `offline` no puede aceptar viajes
 - una solicitud no atendida expira automaticamente dentro de la ventana operativa actual
 - la cola visible para conductoras se prioriza por proximidad y aplica una reserva temporal para reducir competencia simultanea
 - las reglas de zona ya existen en forma base y son configurables por operaciones
 - la conductora ya cuenta con una vista basica de ingresos derivada de viajes completados
+- operaciones ya puede gestionar usuarios internos `operator/admin` y activar o desactivar su acceso
 - las politicas avanzadas de asignacion y endurecimiento preproductivo siguen pendientes antes de cualquier salida productiva
 
 ## Privacidad y datos sensibles

@@ -1,5 +1,10 @@
 import type { User } from "@supabase/supabase-js";
-import type { AuthSession, DriverProfile, PassengerProfile } from "@diva-drive/domain";
+import type {
+  AuthSession,
+  DriverProfile,
+  InternalUserProfile,
+  PassengerProfile
+} from "@diva-drive/domain";
 
 interface SignInPayload {
   email: string;
@@ -73,9 +78,12 @@ interface AuthServiceDependencies {
   } | null;
   getDriverProfile: (driverId: string) => Promise<DriverProfile | null>;
   getPassengerProfile: (passengerId: string) => Promise<PassengerProfile | null>;
+  getInternalUserProfile: (internalUserId: string) => Promise<InternalUserProfile | null>;
   saveDriverProfile: (profile: DriverProfile) => Promise<DriverProfile>;
+  saveInternalUserProfile: (profile: InternalUserProfile) => Promise<InternalUserProfile>;
   savePassengerProfile: (profile: PassengerProfile) => Promise<PassengerProfile>;
   driverProfilesById: Map<string, DriverProfile>;
+  internalUserProfilesById: Map<string, InternalUserProfile>;
   passengerProfilesById: Map<string, PassengerProfile>;
   defaultCity: string;
   userRoles: readonly AuthSession["user"]["role"][];
@@ -88,9 +96,12 @@ export const createAuthService = ({
   supabaseAuth,
   getDriverProfile,
   getPassengerProfile,
+  getInternalUserProfile,
   saveDriverProfile,
+  saveInternalUserProfile,
   savePassengerProfile,
   driverProfilesById,
+  internalUserProfilesById,
   passengerProfilesById,
   defaultCity,
   userRoles
@@ -143,6 +154,14 @@ export const createAuthService = ({
       refreshToken: data.session.refresh_token,
       expiresAt: data.session.expires_at ?? null
     });
+
+    if (session.user.role === "operator" || session.user.role === "admin") {
+      const internalProfile = await getInternalUserProfile(session.user.id);
+
+      if (internalProfile && !internalProfile.isActive) {
+        throw new Error("account_inactive");
+      }
+    }
 
     if (payload.role && session.user.role !== payload.role) {
       throw new Error("role_mismatch");
@@ -210,6 +229,7 @@ export const createAuthService = ({
         phone: session.user.phone,
         city: defaultCity,
         approvalStatus: "pending",
+        operationalStatus: "active",
         availabilityStatus: "offline",
         documentsSubmitted: true,
         licenseNumber: `LIC-${session.user.id.slice(-4)}`,
@@ -230,6 +250,24 @@ export const createAuthService = ({
       };
       passengerProfilesById.set(profile.id, profile);
       await savePassengerProfile(profile);
+    }
+
+    if (
+      (session.user.role === "operator" || session.user.role === "admin") &&
+      !(await getInternalUserProfile(session.user.id))
+    ) {
+      const profile: InternalUserProfile = {
+        id: session.user.id,
+        role: session.user.role,
+        fullName: session.user.fullName,
+        phone: session.user.phone,
+        email: session.user.email,
+        city: defaultCity,
+        isActive: true,
+        createdAt: new Date().toISOString()
+      };
+      internalUserProfilesById.set(profile.id, profile);
+      await saveInternalUserProfile(profile);
     }
   };
 
